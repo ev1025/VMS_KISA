@@ -739,6 +739,7 @@ async function loadClips() {
 
 // 좌측: 데이터 원본(클립) 목록. 라벨해 둔 장수를 같이 보여준다.
 function renderClipList() {
+  if (CUR.mode !== "label") return;   // 데이터확인 등에서 열린 편집기는 좌측 목록을 안 건드린다
   const box = $("#list"); box.innerHTML = "";
   (CLIPS || []).forEach(cl => {
     const n = labeledCount(stemOf(cl));
@@ -807,6 +808,15 @@ function renderEditor(f) {
   const img = el("img"); img.src = f.url; img.style.cssText = "width:100%;display:block;border-radius:6px;-webkit-user-drag:none";
   const ov = el("div"); ov.style.cssText = "position:absolute;inset:0;cursor:crosshair";
   wrap.appendChild(img); wrap.appendChild(ov); pane.appendChild(wrap);
+  // 휠 = 프레임 확대/축소(1~6x). 페이지 스크롤 대신 이미지 줌.
+  let _zoom = 1, _baseW = 0;
+  c.style.overflow = "auto";
+  ov.addEventListener("wheel", ev => {
+    ev.preventDefault();
+    if (!_baseW) _baseW = wrap.getBoundingClientRect().width || f.W;
+    _zoom = Math.min(Math.max(_zoom * (ev.deltaY < 0 ? 1.15 : 1 / 1.15), 1), 6);
+    pane.style.maxWidth = Math.round(_baseW * _zoom) + "px";
+  }, { passive: false });
 
   // 재생바(1초 단위) + 그 아래 참조 샷 한 줄
   const status = el("span", "now", "");            // 저장 상태(이미지 위가 아니라 재생바 안에 쓴다)
@@ -849,7 +859,7 @@ function renderEditor(f) {
   let saveState = "";
   const draw = (drag, dcls) => {
     let s = `<svg viewBox="0 0 ${f.W} ${f.H}" style="position:absolute;inset:0;width:100%;height:100%">`;
-    LB.boxes.forEach((b, i) => { s += rectSvg(b[1] * f.W, b[2] * f.H, b[3] * f.W, b[4] * f.H, b[0], false, i === sel); });
+    LB.boxes.forEach((b, i) => { s += rectSvg(b[1] * f.W, b[2] * f.H, b[3] * f.W, b[4] * f.H, b[0], false, false); });
     if (drag) s += rectSvg(drag.x, drag.y, drag.w, drag.h, dcls, true);
     ov.innerHTML = s + "</svg>";
     status.innerHTML = saveState ? `<span style="color:#f85149">${saveState}</span>` : "";   // 성공은 표시하지 않는다
@@ -938,7 +948,7 @@ function renderEditor(f) {
     ov.style.cursor = h ? (CURSOR[h.tag] || "crosshair") : "crosshair";
     const u = h ? h.i : boxUnder(p);
     if (!h && u !== null) ov.style.cursor = "move";
-    if (u !== sel) { sel = u; draw(); }        // 잡은 박스가 바뀌면 표시를 갱신
+    if (u !== sel) { sel = u; }        // 호버로는 박스를 굵게 하지 않는다(sel 은 Del 대상만 추적)
   };
   const finish = ev => {
     if (rz) { rz = null; draw(); saveNow(); return; }      // 크기조절 끝 → 그 자리에서 저장
