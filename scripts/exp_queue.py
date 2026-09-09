@@ -100,13 +100,17 @@ def gpu_used_mib():
         return 0
 
 
-def train_cmd(exp, defaults, data_yaml):
+def train_cmd(exp, defaults, data_yaml, n_train=0):
     a = dict(defaults.get("train", {}), **exp.get("train", {}))
+    # ram 캐시는 이미지 1장≈0.7MB → 14만장이면 잡당 100GB, 3잡 동시면 OOM(rc=-9). 큰 목록은 캐시 없이 읽는다
+    cache = a.get("cache", "ram")
+    if cache == "ram" and n_train > int(defaults.get("ram_cache_max", 60000)):
+        cache = False
     cmd = [str(PY), "model.py", "train", "--models", exp["model"], "--data", str(data_yaml),
            "--project", str(V / "runs" / exp["name"]), "--device", "0",
            "--batch", str(a.get("batch", 128)), "--epochs", str(a.get("epochs", 80)),
            "--imgsz", str(a.get("imgsz", 640)), "--multi-scale", "--no-export", "--force",
-           "--cache", str(a.get("cache", "ram")), "--workers", str(a.get("workers", 8)),
+           "--cache", str(cache), "--workers", str(a.get("workers", 8)),
            "--extra", f"multi_scale={a.get('multi_scale', 0.5)}"]
     extra = dict(defaults.get("extra", {}), **exp.get("extra", {}))   # 예: scale: 0.9
     cmd += [f"{k}={v}" for k, v in extra.items()]
@@ -150,11 +154,11 @@ def run_one(exp, defaults):
             log(f"{name} 학습 시작 ({exp['model']}, {n_train}장, +{exp.get('extras', [])}, extra={exp.get('extra', {})})")
             LOG_DIR.mkdir(parents=True, exist_ok=True)
             with open(LOG_DIR / f"{name}.log", "a", encoding="utf-8") as lf:
-                rc = subprocess.run(train_cmd(exp, defaults, d / "data.yaml"), cwd=V, stdout=lf, stderr=subprocess.STDOUT,
+                rc = subprocess.run(train_cmd(exp, defaults, d / "data.yaml", n_train), cwd=V, stdout=lf, stderr=subprocess.STDOUT,
                                     env=dict(os.environ, CUDA_VISIBLE_DEVICES="0")).returncode
             pt = best_pt(exp)
             if rc != 0 or pt is None:
-                log(f"{name} 학습 실패 rc={rc} (logs/queue/{name}.log)")
+                log(f"{name} 학습 실패 rc={rc}{' (SIGKILL: OOM 의심 → 캐시/동시잡 확인)' if rc == -9 else ''} (logs/queue/{name}.log). 러너 재실행 시 자동 재시도")
                 write_meta(exp, defaults, n_train, pt, started, "train_failed"); return
         else:
             log(f"{name} best.pt 있음 → 학습 생략, 채점만")
