@@ -56,7 +56,7 @@ async function buildResults() {
   const col = s => s >= 90 ? "#3fb950" : s >= 70 ? "#d29922" : "#f85149";
   const fmtT = m => { const d = new Date(m * 1000); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
   const shortBase = b => (b || "").replace(/^aihub71751_/, "");
-  const HEAD = '<thead><tr style="color:var(--mut);text-align:left;font-size:11px"><th style="padding:8px 6px">실험</th><th>모델</th><th>베이스</th><th>추가셋</th><th>F1</th><th>정검</th><th>미검</th><th>오검</th><th>최적 규칙</th><th>시각</th><th></th></tr></thead>';
+  const HEAD = '<thead><tr style="color:var(--mut);text-align:left;font-size:11px"><th style="padding:8px 6px">실험</th><th>모델</th><th>베이스</th><th>추가셋</th><th>F1 최고</th><th title="구 규칙 4개만의 최고. 신규칙(fire_rule2 스윕)과 비교용">F1 구규칙</th><th>정검</th><th>미검</th><th>오검</th><th>최적 규칙</th><th>시각</th><th></th></tr></thead>';
   const VC = { "정검": "#3fb950", "미검": "#f85149", "오검": "#d29922", "무GT": "#484f58" };
 
   ITEMS.forEach(item => {
@@ -75,13 +75,14 @@ async function buildResults() {
       tr.innerHTML =
         `<td style="padding:9px 6px;font-weight:${top ? 800 : 600}">${top ? "★ " : ""}${d.name}</td>` +
         `<td style="color:var(--mut)">${m.model || ""}</td><td style="color:var(--mut)">${shortBase(m.base)}</td><td style="color:var(--mut);font-size:11px">${extras}</td>` +
-        `<td style="font-weight:800;font-size:14px;color:${col(d.score)};font-variant-numeric:tabular-nums">${d.score.toFixed(2)}</td>` +
+        `<td style="font-weight:800;font-size:14px;color:${col(d.score)};font-variant-numeric:tabular-nums">${d.score.toFixed(2)}${d.rule && d.rule.startsWith("신규칙") ? '<span style="font-size:9px;color:var(--mut);margin-left:3px">신</span>' : ""}</td>` +
+        `<td style="font-weight:700;color:${d.score_old == null ? "var(--mut)" : col(d.score_old)};font-variant-numeric:tabular-nums">${d.score_old == null ? "–" : d.score_old.toFixed(2)}</td>` +
         `<td style="color:#3fb950;font-variant-numeric:tabular-nums">${d.tp}</td><td style="color:#d29922;font-variant-numeric:tabular-nums">${d.fn}</td><td style="color:#f85149;font-variant-numeric:tabular-nums">${d.fp}</td>` +
         `<td style="color:var(--mut)">${d.rule}</td><td style="color:var(--mut);font-variant-numeric:tabular-nums">${fmtT(d.mtime)}</td>` +
         `<td style="color:var(--mut);cursor:pointer;user-select:none" title="규칙 스윕 전체">▸</td>`;
       tb.appendChild(tr);
       const sub = el("tr"); sub.hidden = true;   // 규칙 스윕 전체(펼치기)
-      sub.innerHTML = `<td colspan="11" style="padding:4px 14px 10px;font-size:11px;color:var(--mut)">` +
+      sub.innerHTML = `<td colspan="12" style="padding:4px 14px 10px;font-size:11px;color:var(--mut)">` +
         (d.rules || []).map(r => `<div><span style="display:inline-block;min-width:170px">${r.rule}</span> → <b style="color:${col(r.score)}">${r.score.toFixed(2)}</b> (정검 ${r.tp} 미검 ${r.fn} 오검 ${r.fp})</div>`).join("") + `</td>`;
       tb.appendChild(sub);
       tr.lastElementChild.onclick = () => { sub.hidden = !sub.hidden; tr.lastElementChild.textContent = sub.hidden ? "▸" : "▾"; };

@@ -71,6 +71,62 @@ def f1(pairs):
     r = tp/(tp+fn) if tp+fn else 0; p = tp/(tp+fp) if tp+fp else 0
     return dict(tp=tp, fn=fn, fp=fp, score=round(2*r*p/(r+p)*100, 2) if r+p else 0.0)
 
+# ---- 새 규칙 (scripts/fire_rule2.py 와 동일 로직을 내장. 2026-09-07 방화 88.89 를 낸 채점) ----
+# 불: 절대 임계 fth 를 짧은 창(win 스텝) 안에서 hits 회 연속 충족. 연기: 영상 앞 60초 기준선(80퍼센타일) 대비 상승량 sdelta.
+# 10편에 대해 (fth, win, hits, 연기Δ) 를 스윕해 최고를 고르므로 과적합 위험 → 구 규칙과 나란히 기록만 한다.
+def _baseline(rows, sec=60.0):
+    head = [(bf, bs) for t, bf, bs in rows if t <= sec]
+    if not head: return 0.0, 0.0
+    f = sorted(x[0] for x in head); sm = sorted(x[1] for x in head); i = int(len(f) * 0.8)
+    return f[min(i, len(f) - 1)], sm[min(i, len(sm) - 1)]
+
+def _onset2(rows, fth, sdelta, win, hits, use_smoke):
+    bf0, bs0 = _baseline(rows); q = []
+    for t, bf, bs in rows:
+        hit = bf >= fth
+        if use_smoke and not hit: hit = bs >= bs0 + sdelta and bs >= 0.3
+        q.append((t, hit))
+        if len(q) > win: q.pop(0)
+        if sum(1 for _, h in q if h) >= hits: return next(t0 for t0, h in q if h)
+    return None
+
+def _score2(per, **kw):
+    tp = fn = fp = 0; det = []
+    for stem, (rows, gt) in sorted(per.items()):
+        o = _onset2(rows, **kw); sa = None if o is None else o + DELAY
+        if sa is None: v = "미검"; fn += 1
+        elif gt - BEFORE <= sa <= gt + AFTER: v = "정검"; tp += 1
+        else: v = "오검"; fp += 1; fn += 1
+        det.append((stem, gt, sa, v))
+    r = tp / (tp + fn) if tp + fn else 0; pr = tp / (tp + fp) if tp + fp else 0
+    return (round(2 * r * pr / (r + pr) * 100, 2) if r + pr else 0.0), tp, fn, fp, det
+
+def new_rule_sweep(per, tag):
+    """per = {stem: (rows[(t, {"fire","smoke"})], gt)}. 시계열을 results/par/tl/<tag>.json 에 남기고 새 규칙 스윕 상위 5 + 클립별을 출력."""
+    import json
+    tl = {stem: {"rows": [[t, b["fire"], b["smoke"]] for t, b in rows], "gt": gt} for stem, (rows, gt) in per.items()}
+    tld = Path(__file__).resolve().parent / "results/par/tl"; tld.mkdir(parents=True, exist_ok=True)
+    (tld / (str(tag).replace("/", "_") + ".json")).write_text(json.dumps(tl))
+    per2 = {k: ([tuple(r) for r in v["rows"]], v["gt"]) for k, v in tl.items() if v["gt"] is not None}
+    if not per2:
+        print("  (신규칙: GT 있는 클립 없음)"); return
+    res = []
+    for fth in (0.10, 0.14, 0.18, 0.22, 0.26, 0.30, 0.34, 0.40, 0.50):
+        for win, hits in ((3, 2), (4, 2), (6, 3), (8, 4), (10, 5), (12, 5), (12, 7), (14, 6), (16, 7), (16, 9), (20, 9), (20, 12)):
+            for use_smoke, sdelta in [(False, 0.0)] + [(True, d) for d in (0.2, 0.3, 0.4, 0.5)]:
+                f1v, tp, fn, fp, det = _score2(per2, fth=fth, sdelta=sdelta, win=win, hits=hits, use_smoke=use_smoke)
+                res.append((f1v, tp, fn, fp, fth, win, hits, use_smoke, sdelta, det))
+    res.sort(key=lambda x: (-x[0], x[3], -x[4]))
+    top = [r for r in res if r[0] >= res[0][0] - 0.01]
+    print(f"\n=== 신규칙 스윕 (연속hits·연기 기준선Δ · 10편 스윕이라 과적합 주의 · 최고점 설정 {len(top)}/{len(res)}개) ===")
+    for r in res[:5]:
+        sm = f"연기+{r[8]:.1f}" if r[7] else "불만"
+        print(f"  신규칙 f{r[4]:.2f} {r[6]}/{r[5]} {sm:7s} → {r[0]:6.2f}  (정검 {r[1]} 미검 {r[2]} 오검 {r[3]})")
+    print("\n=== 클립별 (신규칙 최고) ===")
+    for stem, gt, sa, v in res[0][9]:
+        print(f"  신클립 {stem}: {v} (gt={gt} sa={'-' if sa is None else round(sa, 1)})")
+
+
 def main():
     global IMGSZ
     ap = argparse.ArgumentParser()
@@ -109,6 +165,10 @@ def main():
                 ok = any(gt - BEFORE <= x <= gt + AFTER for x in sa); extra = (len(sa) - 1) if ok else len(sa)
                 v = ("정검" if ok else "미검") + (f"+오검{extra}" if extra > 0 else "")
             print(f"  클립 {stem}: {v} (gt={gt} sa={[round(x, 1) for x in sa]})")
+    try:
+        new_rule_sweep(per, a.tag or Path(a.model).stem)
+    except Exception as e:
+        print(f"  (신규칙 스윕 실패: {e!r})")
 
 if __name__ == "__main__":
     main()

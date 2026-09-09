@@ -590,6 +590,8 @@ class H(BaseHTTPRequestHandler):
                     continue
                 _clips = {m.group(1): m.group(2) for m in re.finditer(r"^\s*클립 (\S+): (\S+)", txt, re.M)}   # score_kisa 클립별 판정
                 best = max(rows, key=lambda r: r["score"])
+                _oldrows = [r for r in rows if not r["rule"].startswith("신규칙")]   # 구 규칙만의 최고(신규칙과 나란히)
+                _score_old = max(_oldrows, key=lambda r: r["score"])["score"] if _oldrows else None
                 _stem = f.parent.name if f.name == "score.txt" else f.stem
                 _s = _stem.lower()
                 if _meta.get("item"):
@@ -603,7 +605,7 @@ class H(BaseHTTPRequestHandler):
                 else:
                     _item = "\ubc29\ud654"                       # 방화(기본)
                 out.append({"name": _stem, "score": best["score"], "rule": best["rule"],
-                            "tp": best["tp"], "fn": best["fn"], "fp": best["fp"], "item": _item,
+                            "tp": best["tp"], "fn": best["fn"], "fp": best["fp"], "item": _item, "score_old": _score_old,
                             "meta": {k: _meta.get(k) for k in ("model", "base", "extras", "extra", "status", "n_train")}, "clips": _clips,
                             "n": len(rows), "mtime": int(f.stat().st_mtime), "rules": rows})
             out.sort(key=lambda r: -r["score"])
