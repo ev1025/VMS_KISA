@@ -33,24 +33,5 @@ run_exp(){
 T=$(date +%Y%m%d)
 run_exp fresh_48k_base_$T      yolo11s
 run_exp fresh_48k_fasdd_$T     yolo11s fasdd_yolo
-run_exp fresh_48k_snowfull_$T  yolo11s fasdd_snowfog fasdd_yolo
-run_exp fresh_48k_full_$T      yolo11s fasdd_snowfog fasdd_yolo wildfire_fog_neg
-run_exp fresh_48k_m_$T         yolo11m fasdd_snowfog fasdd_yolo
-# 산불 양성(화염/연기 59474장) 투입: 역대최고 snowfull 조합에 추가
-run_exp fresh_48k_wildpos_$T   yolo11s fasdd_snowfog fasdd_yolo wildfire_pos_yolo
-run_exp fresh_48k_wildall_$T   yolo11s fasdd_snowfog fasdd_yolo wildfire_pos_yolo wildfire_fog_neg
-# azimjaan(불/연기 + 구름 하드네거 2천) 리매핑본
-run_exp fresh_48k_azimjaan_$T  yolo11s fasdd_snowfog fasdd_yolo azimjaan_yolo
-# 24k vs 48k 데이터량 비교: BASE 만 24k 프록시로 바꿔 동일 레시피
-BASE=$V/data/학습데이터/aihub71751_24k run_exp fresh_24k_base_$T      yolo11s
-BASE=$V/data/학습데이터/aihub71751_24k run_exp fresh_24k_snowfull_$T  yolo11s fasdd_snowfog fasdd_yolo
-# --- 다양화: 모델 변형 (snowfull 레시피 = fasdd_snowfog + fasdd) ---
-run_exp fresh_snf_n_$T     yolo11n  fasdd_snowfog fasdd_yolo
-run_exp fresh_snf_26n_$T   yolo26n  fasdd_snowfog fasdd_yolo
-run_exp fresh_snf_l_$T     yolo11l  fasdd_snowfog fasdd_yolo
-run_exp fresh_snf_x_$T     yolo11x  fasdd_snowfog fasdd_yolo
-# --- 다양화: 데이터 조합 (yolo11s) ---
-run_exp fresh_sink_$T      yolo11s  fasdd_snowfog fasdd_yolo wildfire_pos_yolo azimjaan_yolo dfire_yolo
-run_exp fresh_ext3_$T      yolo11s  fasdd_yolo dfire_yolo
-run_exp fresh_dfmix_$T     yolo11s  fasdd_snowfog fasdd_yolo dfire_yolo
-log "FRESH FIRE QUEUE DONE"
+# ---- 이후 실험은 scripts/exp_queue.py + configs/queue_fire_20260909.yaml 로 이관(2026-09-09) ----
+log "FRESH FIRE QUEUE DONE (exp_queue.py 로 인수)"

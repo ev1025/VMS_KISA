@@ -1,0 +1,39 @@
+# 방화 실험 큐 (2026-09-09). 실행: python scripts/exp_queue.py run configs/queue_fire_20260909.yaml --jobs 3
+# 실험 추가 = 아래에 한 항목 추가(스크립트 편집 없음). 이름이 results/ 에 있으면 자동 건너뜀.
+defaults:
+  base: aihub71751_48k          # 48k 평면풀(12프레임)
+  oversample: { human_fire: 5 } # 손라벨 ×5 (목록 반복)
+  val_small: 600
+  train: { epochs: 80, batch: 128, imgsz: 640, multi_scale: 0.5, cache: ram, workers: 8 }
+  vram_gate_mib: 120000
+  stagger_sec: 90
+
+experiments:
+  # --- 이미 구 큐로 완료/진행: base(완료), fasdd(진행중) → 결과 있으면 건너뜀 ---
+  - { name: fresh_48k_base_20260909,     model: yolo11s, extras: [] }
+  - { name: fresh_48k_fasdd_20260909,    model: yolo11s, extras: [fasdd_yolo] }
+  # --- 데이터 애블레이션 (48k base) ---
+  - { name: fresh_48k_snowfull_20260909, model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo] }
+  - { name: fresh_48k_full_20260909,     model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_fog_neg] }
+  - { name: fresh_48k_m_20260909,        model: yolo11m, extras: [fasdd_snowfog, fasdd_yolo] }
+  - { name: fresh_48k_wildpos_20260909,  model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo] }
+  - { name: fresh_48k_wildall_20260909,  model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo, wildfire_fog_neg] }
+  - { name: fresh_48k_azimjaan_20260909, model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo] }
+  # --- 24k vs 48k 데이터량 비교 (BASE 만 교체) ---
+  - { name: fresh_24k_base_20260909,     model: yolo11s, base: aihub71751_24k, extras: [] }
+  - { name: fresh_24k_snowfull_20260909, model: yolo11s, base: aihub71751_24k, extras: [fasdd_snowfog, fasdd_yolo] }
+  # --- 모델 변형 (snowfull 레시피) ---
+  - { name: fresh_snf_n_20260909,        model: yolo11n, extras: [fasdd_snowfog, fasdd_yolo] }
+  - { name: fresh_snf_26n_20260909,      model: yolo26n, extras: [fasdd_snowfog, fasdd_yolo] }
+  - { name: fresh_snf_l_20260909,        model: yolo11l, extras: [fasdd_snowfog, fasdd_yolo] }
+  - { name: fresh_snf_x_20260909,        model: yolo11x, extras: [fasdd_snowfog, fasdd_yolo], train: { batch: 64 } }
+  # --- 데이터 조합 ---
+  - { name: fresh_sink_20260909,         model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo, azimjaan_yolo, dfire_yolo] }
+  - { name: fresh_ext3_20260909,         model: yolo11s, extras: [fasdd_yolo, dfire_yolo] }
+  - { name: fresh_dfmix_20260909,        model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, dfire_yolo] }
+  # --- 소형 불(원경) zoom-out 증강 scale 0.9 ---
+  - { name: fresh_zoom_snf_20260909,     model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo], extra: { scale: 0.9 } }
+  - { name: fresh_zoom_wild_20260909,    model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo], extra: { scale: 0.9 } }
+  # --- dfire (구 _exp_dfire.sh 대체) ---
+  - { name: dfire_48k_20260909,          model: yolo11s, extras: [dfire_yolo] }
+  - { name: dfire_48k_snowfull_20260909, model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, dfire_yolo] }

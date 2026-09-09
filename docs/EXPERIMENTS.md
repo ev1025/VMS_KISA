@@ -10,6 +10,8 @@
 
 ## 0. 실행 인프라 규약 (안 지키면 느려지거나 죽는다)
 
+> **이 표는 `scripts/exp_queue.py` 가 코드로 강제한다.** 실험은 러너로만 돌린다(`configs/*.yaml`). 2026-09-09 fresh 큐가 이 규약을 어겨(val=train 전체·multi_scale=True·심링크 숲) 실험당 5시간이 걸린 것이 러너를 만든 계기.
+
 | 항목 | 값 | 이유 |
 |---|---|---|
 | GPU | B200 1장 (183GB) | `CUDA_VISIBLE_DEVICES=0` |
@@ -195,3 +197,26 @@
 - 각 잡은 `학습 → score_kisa.py(같은 imgsz, --tiles) → results/<이름>.txt` 로 끝난다
 - 결과 취합은 `scripts/collect_results.py` → `results/ALL_RESULTS.md`
 - 실행 후 이 문서의 "이력" 절에 값과 F1 을 추가한다
+
+
+---
+
+## 5. 2026-09-09 fresh 큐 (48k 베이스, "처음부터 다시") + 러너 이관
+
+- 베이스가 `dataset_24k` → **`aihub71751_48k`**(12프레임 평면풀 39,003장)로 바뀜. 24k 는 삭제됐고 비교용 프록시 `aihub71751_24k`(격프레임 19,502) 를 학습데이터에 둠
+- 손라벨 `human_fire` 는 1,140장(229프레임×±2초 전파)으로 재빌드. 러너가 실험 전 자동 재빌드
+- 데이터 확충: fasdd_yolo 63,546→**95,314**(val+test 병합) · `azimjaan_yolo` 10,739(0구름/1불/2연기 → 불0·연기1·구름 하드네거 2,000 서브샘플) · `wildfire_pos_yolo` 59,474(산불 양성, 연기 우세 71,788 vs 화염 11,717 박스) · `dfire_yolo` 21,527(이미 3split)
+- 큐 정의: `configs/queue_fire_20260909.yaml` (21개). 진행/결과: `python scripts/exp_queue.py status configs/queue_fire_20260909.yaml`, 대시보드 결과 탭
+
+| 축 | 실험 | 목적 |
+|---|---|---|
+| 데이터 애블레이션 | 48k_base · fasdd · snowfull · full(+fog_neg) · wildpos · wildall · azimjaan | 데이터별 방화 리콜 기여 |
+| 데이터량 | 24k_base ↔ 48k_base · 24k_snowfull ↔ 48k_snowfull | 24k vs 48k |
+| 모델 | snf_n · snf_26n(NMS-free) · snf_l · snf_x · 48k_m | 크기·NMS-free. 제출 후보=11s, 11m/l/x 는 KD 티처 |
+| 조합 | sink(전부) · ext3(48k+fasdd+dfire) · dfmix | 다중 소스 |
+| 소형 불 | zoom_snf · zoom_wild (`scale=0.9`) | 원경 작은 불(미검 주원인) zoom-out 증강 |
+| dfire | dfire_48k · dfire_48k_snowfull | D-Fire 단독 효과 |
+
+- 나온 결과: `fresh_48k_base` **57.14**(정검4 미검6 오검0) — 48k 단독 바닥값, 병목=리콜
+- 배포 제약: 실배포 Qualcomm NPU(+KISA 인증). 경량 예산 안 정확도 우선(속도 지금 안 봄). 제출 후보 yolo11s, 큰 모델은 KD 티처. NPU 는 INT8·NMS-free 유리(나중)
+- 다음 방법론 후보(문헌): 네거티브 ≤10% 비율 감사 · 2단계 학습(coarse→fine) · 손실 CIoU→WIoU v3/ShapeIoU · YOLOv12/v10 NMS-free · Translucent alpha-blend 증강(연기) · FDA 도메인 적응(타깃=KISA 검증셋 배경) · ByteTrack 2차연관+Ring Buffer FSM(10초 규칙)

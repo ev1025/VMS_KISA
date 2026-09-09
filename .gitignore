@@ -46,3 +46,6 @@ kaggle.json
 .aihub_key
 sftp_profiles.json
 go2rtc.yaml
+_exp/
+dash_v2/__pycache__/
+scripts/__pycache__/

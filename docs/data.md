@@ -1,39 +1,56 @@
 # 데이터 활용 대장 (Claude 참조 전용)
 
-> 새 데이터를 들여올 때/부적합 판정할 때 이 파일을 읽고 갱신한다.
+> 새 데이터를 들여올 때/부적합 판정할 때 이 파일을 읽고 갱신한다. 2026-09-09 기준.
 
-## 데이터 대장 (받은 것 · 부적합한 것) — 2026-09-09 기준
+## 원본데이터 (data/원본데이터/)
 
 ### 방화(화재/연기)
-| 원본데이터 | 용량 | 내용 | 용도 |
+| 원본데이터 | 내용 | 라벨 | 학습 연결 |
 |---|---|---|---|
-| kisa_산불_원천 | 112G | 합성 산불 영상(실제 불꽃) 516편 + 이미지 9,500 | 방화 학습·손라벨 대상 |
-| kisa_연구개발_방화영상 | 24G | 방화 영상 75편(xml GT) | 방화 학습·손라벨 |
-| aihub71330_산불_원천ts | 73G→ | AI-Hub 265 산불 원천 split zip. 양성(화염·백색회색·흑색연기) + 음성(구름·굴뚝연기·안개연무), 30fps. `frames/`에 초당1장 추출 후 원본 zip 삭제 | 방화 양성 학습 + 하드네거티브 |
-| aihub71330_산불_안개구름 | 85G | NegativeDB 안개·구름 이미지 96,050 | 방화 하드네거티브(→ 학습데이터 wildfire_fog_neg 12,007) |
-| open_fasdd_flir_llvip | 28G | 오픈 화재/열화상(FASDD/FLIR/LLVIP) 이미지 | 방화 외부 데이터(→ fasdd_yolo) |
+| kisa_연구개발_방화영상 | 방화 영상 75편(xml GT) | 손라벨 `손라벨/fire_labels.json` 229프레임 | → `human_fire` 1,140장(±2초 전파), 큐에서 ×5 |
+| kisa_산불_원천 | 합성 산불 영상 516편 + 이미지 9,500 | 손라벨 대상 | (손라벨 편집기 대상) |
+| aihub71751_48k | AI-Hub 71751 화재 12프레임 평면풀 **39,003장** | YOLO 0불/1연기 | **큐 베이스**. 격프레임 절반 → `아래 aihub71751_24k` |
+| aihub71330_산불 | `frames/`=양성 7폴더 **59,474장**(화염 11,007·연기 52,925 이미지) · `안개구름/`=음성 | 100% 짝, 화염 11,717·연기 71,788 박스. 굴뚝연기는 실제 연기라 `PositiveRealDB_굴뚝연기`로 개명(2026-09-09) | 양성 → `wildfire_pos_yolo` 59,474 · 음성 → `wildfire_fog_neg` 12,007 |
+| open_fasdd | FASDD train 63,546 · val 15,884 · test 15,884 (COCO json, 0 fire/1 smoke) | 파일명 중복 0 → 전부 학습 | → `fasdd_yolo` **95,314** · 증강본 `fasdd_snowfog`/`fasdd_snow2` |
+| open_dfire | D-Fire 21,527(train+val+test) | 원본 0 smoke/1 fire → **스왑**해 0불/1연기 | → `dfire_yolo` 21,527 |
+| open_azimjaan_fire | Roboflow 3클래스 **0=구름 / 1=불 / 2=연기**(data.yaml 없음, 라벨 증거로 확정) | 대시보드는 원본 그대로(구름에 박스 보임) | → `azimjaan_yolo` **10,739**: 불→0·연기→1·구름 박스 제거 후 구름 이미지 2,000 서브샘플=하드네거 |
 
 ### 사람(침입/배회/쓰러짐)
-| 원본데이터 | 용량 | 내용 | 용도 |
+| 원본데이터 | 내용 | 라벨 | 학습 연결 |
 |---|---|---|---|
-| kisa_연구개발_사람영상 | 257G | 사람 이벤트 영상 825편(xml Alarm/StartTime GT) | 사람 탐지 손라벨 대상 |
-| aihub_침입쓰러짐영상 | 4.2G | 침입/쓰러짐 80편. json GT = `event_frame`(이벤트 프레임 구간)·`event_class`·`event_length` | 사람 탐지 손라벨(이벤트 프레임 앵커) |
-| open_coco | 19G | COCO 사람 이미지 | 사람 탐지 학습 |
+| kisa_연구개발_사람영상 | 사람 이벤트 영상 825편(xml Alarm/StartTime) | 의사라벨(person_v3 티처) 프리필 → 손라벨 `손라벨/person_labels.json`(0.5초=2FPS) | 미연결(person 학습 재구축 시) |
+| aihub_침입쓰러짐영상 | 침입/쓰러짐 80편, json `event_frame` GT | 같은 방식 손라벨(현재 78박스) | 미연결 |
+| open_llvip | LLVIP visible 15,488 + infrared 15,488, person VOC | VOC→YOLO 42,437 박스(visible). infrared 는 대시보드 제외 | 미연결(야간 person 후보) |
 
 ### 채점 (학습 절대 금지)
-| 원본데이터 | 용량 | 내용 |
+| 원본데이터 | 내용 |
+|---|---|
+| kisa_배포_검증영상 | KISA 채점셋 4항목(방화10·침입30·배회30·쓰러짐10) + zone_maps. **train/test 유출 금지**. 방화 채점 = `deploy_val/방화(10개)/배포` |
+
+## 학습데이터 (data/학습데이터/) 현역 세트
+| 세트 | 장수 | 출처/비고 |
 |---|---|---|
-| kisa_배포_검증영상 | 20G | KISA 채점셋 4항목(방화10·침입30·배회30·쓰러짐10) + zone_maps(구역 폴리곤). **train/test 유출 금지** |
+| fasdd_yolo | 95,314 | open_fasdd 3split 전부 |
+| fasdd_snowfog / fasdd_snow2 | 3,930 / 702 | fasdd 설경·안개 증강(train 기반, val/test 증강은 미생성) |
+| dfire_yolo | 21,527 | open_dfire 클래스 스왑 |
+| azimjaan_yolo | 10,739 | 양성 8,739 + 구름 하드네거 2,000 |
+| wildfire_pos_yolo | 59,474 | aihub71330_산불 frames/ 양성 |
+| wildfire_fog_neg | 12,007 | aihub71330_산불 안개구름/ 음성 |
+| human_fire | 1,140 | fire_labels.json → `build_humanset.py` (러너가 자동 재빌드) |
+| aihub71751_24k | 19,502 | 48k 격프레임 절반. 24k vs 48k 비교 프록시 |
+| person_v2/v3/v4 · person_pl · pose_v2 · aihub_int_pl | - | 사람/자세 계열(이전 세션) |
+| 손라벨/ | - | fire_labels.json · person_labels.json (원천). `cls:-1` = 검토완료 마커 |
 
-### 부적합·삭제 (재다운로드 금지)
-- **aihub71953_다각도CCTV** (삭제, 166G): 다각도 침입/스토킹 영상이나 GT가 `event_class` + 캡션(CoT)뿐 = **프레임 박스·정확한 이벤트 시각 없음**. VLM 영상이해용이라 우리 탐지/채점엔 못 씀.
-- **open_coco** (삭제, 19G): full COCO(80클래스 일반사진). 사람 base로는 표준이나 **CCTV 도메인 아님**(고정각·원거리 감시 vs 일상사진), class 0만 필요한데 통째라 과함. person_v2에 이미 반영돼 역할 종료 → 삭제.
-- **kisa_연구개발_기타영상** (삭제, 392G): 차량불법행위·싸움·유기 = **우리 4항목과 다른 이벤트 종류**.
+## 부적합·삭제 (재다운로드 금지)
+- **aihub71953_다각도CCTV**(166G): GT 가 `event_class`+캡션뿐, 박스·이벤트 시각 없음 → VLM용.
+- **open_coco**(19G): 일반사진 80클래스, CCTV 도메인 아님. person_v2 에 반영 후 역할 종료.
+- **kisa_연구개발_기타영상**(392G): 차량불법·싸움·유기 = 우리 4항목 아님.
+- **open_cctv_fire**(355M, 2026-09-09 삭제): 분류 라벨만, 박스 없음.
+- **dataset_24k / clean24k**(2026-09-09 삭제): 48k 평면풀로 대체. 참조하던 스크립트는 `scripts/_archive/`.
+- **open_fasdd_flir_llvip**(개명): open_fasdd + open_llvip 로 분리. FLIR 열화상은 제외.
 
-### GT 유무 판별 기준 (새 데이터 받을 때)
-사람/이벤트 데이터는 **프레임 박스 또는 이벤트 프레임/시각 GT가 있어야** 학습·채점에 유효.
-`event_class`·캡션만 있는 VLM형은 탐지엔 부적합 → 받기 전에 GT 구조부터 확인.
-
-### 사람 라벨 파이프라인 (현재)
-- 의사라벨: `pl_person.py`가 **교사 yolo11x+타일**로 person 박스 자동 생성(conf≥0.35 채택, 애매/빈건 배경) → person_v2/v3/v4 학습.
-- 손라벨 계획: 데이터확인 라벨편집에서 **의사라벨(person_v3) 프리필 → 사용자 수정** → person 정답 축적(SAM2 전파는 후순위).
+## 규칙
+- 외부 데이터의 train/val/test 는 **같은 클립·중복 파일이 아니면 전부 학습**에 합친다(평가는 KISA 채점셋).
+- 음성(배경) 이미지는 전체 학습셋의 **10% 이내**(넘으면 리콜 붕괴). 큐 mix 마다 비율 확인.
+- 사람/이벤트 데이터는 **프레임 박스 또는 이벤트 시각 GT** 가 있어야 유효. 받기 전에 GT 구조부터 확인.
+- 클래스 규약: **0=fire(불), 1=smoke(연기)**. 외부셋은 반드시 매핑 확인(D-Fire 스왑, azimjaan 3클래스 사례).

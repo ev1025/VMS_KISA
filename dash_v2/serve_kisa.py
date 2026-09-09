@@ -407,6 +407,8 @@ class H(BaseHTTPRequestHandler):
             self._stream(HERE/"dashboard.html", "text/html; charset=utf-8"); return
         if p == "/app.js":
             self._stream(HERE/"app.js", "application/javascript; charset=utf-8"); return
+        if p.startswith("/js/") and p.endswith(".js") and "/" not in p[4:] and ".." not in p:   # 분리된 대시보드 모듈
+            self._stream(HERE/"js"/p[4:], "application/javascript; charset=utf-8"); return
         if p == "/api/meta":
             self._stream(HERE/"dash_meta.json", "application/json; charset=utf-8"); return
         if p == "/api/dataset":
@@ -477,11 +479,16 @@ class H(BaseHTTPRequestHandler):
             out = []
             rdir = G / "results"
             pat = re.compile(r"^\s*(.+?)\s+→\s+([0-9.]+)\s+\(정검 (\d+) 미검 (\d+) 오검 (\d+)\)", re.M)
-            for f in sorted(rdir.glob("*.txt")):
+            files = sorted(rdir.glob("*.txt")) + sorted(rdir.glob("*/score.txt"))   # 구(평면 txt) + 신(results/<exp>/score.txt)
+            for f in files:
                 try:
                     txt = f.read_text(errors="ignore")
                 except Exception:
                     continue
+                _meta = {}
+                if f.name == "score.txt":                       # 새 레이아웃: 실험명=폴더명, item 은 meta.json
+                    try: _meta = json.loads((f.parent / "meta.json").read_text(encoding="utf-8"))
+                    except Exception: _meta = {}
                 rows = []
                 for m in pat.finditer(txt):
                     rows.append({"rule": m.group(1).strip(), "score": float(m.group(2)),
@@ -489,8 +496,11 @@ class H(BaseHTTPRequestHandler):
                 if not rows:
                     continue
                 best = max(rows, key=lambda r: r["score"])
-                _s = f.stem.lower()
-                if "intrusion" in _s or "\uce68\uc785" in _s:      # 침입
+                _stem = f.parent.name if f.name == "score.txt" else f.stem
+                _s = _stem.lower()
+                if _meta.get("item"):
+                    _item = _meta["item"]
+                elif "intrusion" in _s or "\uce68\uc785" in _s:      # 침입
                     _item = "\uce68\uc785"
                 elif "loiter" in _s or "roam" in _s or "\ubc30\ud68c" in _s:   # 배회
                     _item = "\ubc30\ud68c"
@@ -498,7 +508,7 @@ class H(BaseHTTPRequestHandler):
                     _item = "\uc4f0\ub7ec\uc9d0"
                 else:
                     _item = "\ubc29\ud654"                       # 방화(기본)
-                out.append({"name": f.stem, "score": best["score"], "rule": best["rule"],
+                out.append({"name": _stem, "score": best["score"], "rule": best["rule"],
                             "tp": best["tp"], "fn": best["fn"], "fp": best["fp"], "item": _item,
                             "n": len(rows), "mtime": int(f.stat().st_mtime), "rules": rows})
             out.sort(key=lambda r: -r["score"])
