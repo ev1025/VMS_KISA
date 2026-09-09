@@ -1,0 +1,48 @@
+# === 대용량 데이터·산출물 (커밋 금지) ===
+data/
+model/
+runs/
+dumps/
+feats/
+results/
+weights/
+logs/
+
+# === 캐시·가상환경 ===
+__pycache__/
+*.pyc
+.venv/
+venv/
+work/
+
+# === 대시보드 생성 캐시·로그 ===
+dash_v2/dash_meta.json
+dash_v2/dataset_meta.json
+dash_v2/*.log
+
+# === 가중치·미디어·압축 (코드 트리에 섞여도 무시) ===
+*.pt
+*.pth
+*.onnx
+*.engine
+*.npz
+*.npy
+*.mp4
+*.jpg
+*.jpeg
+*.png
+*.zip
+*.z[0-9]*
+*.ts
+*.log
+*.tmp
+
+# === 비밀·자격증명 (절대 커밋 금지) ===
+*.key
+*_key
+.env
+*.env
+kaggle.json
+.aihub_key
+sftp_profiles.json
+go2rtc.yaml
