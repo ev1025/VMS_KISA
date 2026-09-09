@@ -120,6 +120,7 @@ async function openFrameAt(clip, sec, mode) {
   }
   const url = `/frameat?clip=${encodeURIComponent(clip)}&t=${sec}`;
   if (ED && ED.clip === clip) {
+    if (ED.keydown) { document.onkeydown = ED.keydown; document.onkeydown && (document.onkeyup = ED.keyup); }   // 같은 클립 재클릭 시 showRawVideo 가 지운 단축키 복구(기존 버그)
     // 화면을 지우지 않는다. 새 그림을 다 받은 뒤 바꿔 끼우면 사라졌다 나타나는 깜빡임이 없다.
     const n = ++loadSeq;
     const pre = new Image();
@@ -231,6 +232,9 @@ function renderEditor(f) {
   // 드래그로 박스: 좌버튼=불(0), 우버튼=연기(1), 그리는 즉시 자동저장
   // 이미 있는 박스는 변·모서리 근처를 잡아 크기를 고친다(핸들은 그리지 않는다).
   let st = null, curCls = 0, rz = null, mv = null, sel = null, pan = null, _space = false;   // sel=Del대상, mv=이동, pan=스페이스드래그 화면이동
+  const hist = [], redo = [];   // undo/redo: 변경 직전 박스 배열 스냅샷(추가·삭제·이동·리사이즈·복사·클래스)
+  const snap = () => { hist.push(JSON.stringify(LB.boxes)); if (hist.length > 100) hist.shift(); redo.length = 0; };
+  const restore = (from, to) => { if (!from.length) return; to.push(JSON.stringify(LB.boxes)); LB.boxes = JSON.parse(from.pop()); sel = null; draw(); saveNow(); };
   const HIT = 8;                       // 화면 기준 8px 안이면 그 변을 잡은 것으로 본다
   const CURSOR = { n: "ns-resize", s: "ns-resize", w: "ew-resize", e: "ew-resize", nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize" };
   const toImg = ev => { const rc = img.getBoundingClientRect(); return { x: (ev.clientX - rc.left) / rc.width * f.W, y: (ev.clientY - rc.top) / rc.height * f.H }; };
@@ -284,12 +288,12 @@ function renderEditor(f) {
     if (_space) { pan = { sx: ev.clientX, sy: ev.clientY, tx0: _tx, ty0: _ty }; ov.style.cursor = "grabbing"; return; }   // 스페이스+드래그 = 확대이미지 이동
     const p = toImg(ev);
     const h = ev.button === 2 || ev.shiftKey ? null : hitTest(p);   // 우클릭·Shift 는 언제나 새 박스
-    if (h) { rz = h; sel = h.i; return; }
+    if (h) { snap(); rz = h; sel = h.i; return; }
     if (ev.button !== 2 && !ev.shiftKey) {
       const u = boxUnder(p);                        // 박스 안쪽을 잡았으면 위치 이동
       if (u !== null) {
         const b = LB.boxes[u];
-        mv = { i: u, ox: p.x - b[1] * f.W, oy: p.y - b[2] * f.H };
+        snap(); mv = { i: u, ox: p.x - b[1] * f.W, oy: p.y - b[2] * f.H };
         sel = u; return;
       }
     }
@@ -318,7 +322,7 @@ function renderEditor(f) {
     if (mv) { mv = null; draw(); saveNow(); return; }      // 이동 끝 → 그 자리에서 저장
     if (!st) return; const p = toImg(ev);
     const x = Math.min(st.x, p.x), y = Math.min(st.y, p.y), w = Math.abs(p.x - st.x), h = Math.abs(p.y - st.y); st = null;
-    if (w > 4 && h > 4) { LB.boxes.push([curCls, x / f.W, y / f.H, w / f.W, h / f.H]); draw(); saveNow(); }
+    if (w > 4 && h > 4) { snap(); LB.boxes.push([curCls, x / f.W, y / f.H, w / f.W, h / f.H]); draw(); saveNow(); }
     else { draw(); saveNow(); }   // 박스 안 쳐도 프레임 안쪽 클릭이면 현재 상태 저장(빈 라벨=검토완료)
   };
   ov.onmouseup = finish;
@@ -333,7 +337,7 @@ function renderEditor(f) {
       f.file = `${f.stem}_${String(sec).padStart(4, "0")}.png`;
       LB.file = f.file; LB.sec = sec;
       LB.boxes = saved ? saved.map(b => b.slice()) : [];
-      sel = null; st = null; rz = null; mv = null;
+      sel = null; st = null; rz = null; mv = null; hist.length = 0; redo.length = 0;
       img.src = url;                     // 미리 받아둔 그림이라 즉시 바뀐다
       bar.sl.value = _disp(sec); bar.num.value = _disp(sec);
       fillShots(); draw();
@@ -342,11 +346,22 @@ function renderEditor(f) {
   // 키보드: Ctrl+Z 취소 · ←/→ 또는 W/E 1초 · Shift+←/→ 10초
   document.onkeyup = ev => { if (ev.code === "Space") { _space = false; if (!pan) ov.style.cursor = "crosshair"; } };
   document.onkeydown = ev => {
+    if (ev.target && /^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName)) return;   // 프레임번호 입력 중엔 단축키 끔
     if (ev.code === "Space") { ev.preventDefault(); _space = true; if (!pan) ov.style.cursor = "grab"; return; }   // 스페이스=이동 모드(드래그로 확대이미지 이동)
-    if ((ev.ctrlKey || ev.metaKey) && (ev.key === "z" || ev.key === "Z")) { ev.preventDefault(); if (LB.boxes.length) { LB.boxes.pop(); draw(); saveNow(); } return; }
+    if ((ev.ctrlKey || ev.metaKey) && (ev.key === "z" || ev.key === "Z")) { ev.preventDefault(); ev.shiftKey ? restore(redo, hist) : restore(hist, redo); return; }   // Ctrl+Z 되돌리기 · Ctrl+Shift+Z 다시
+    if ((ev.ctrlKey || ev.metaKey) && (ev.key === "y" || ev.key === "Y")) { ev.preventDefault(); restore(redo, hist); return; }
+    if (ev.key === "c" || ev.key === "C") {                                              // C = 이전 프레임(저장된) 박스 복사. 불·쓰러진 사람은 제자리
+      const prev = existingBoxes(f.stem, f.t - _step());
+      if (prev && prev.length) { snap(); prev.forEach(b => LB.boxes.push(b.slice())); draw(); saveNow(); }
+      return;
+    }
+    if ((ev.key === "1" || ev.key === "2") && LB.mode !== "person" && sel !== null && LB.boxes[sel]) {   // 1=불 2=연기 (선택 박스)
+      snap(); LB.boxes[sel][0] = ev.key === "1" ? 0 : 1; draw(); saveNow(); return;
+    }
+    if (ev.key === "?" || (ev.key === "/" && ev.shiftKey)) { toggleHelp(); return; }
     if (ev.key === "Delete" || ev.key === "Backspace") {
       ev.preventDefault();
-      if (sel !== null && LB.boxes[sel]) { LB.boxes.splice(sel, 1); sel = null; draw(); saveNow(); }
+      if (sel !== null && LB.boxes[sel]) { snap(); LB.boxes.splice(sel, 1); sel = null; draw(); saveNow(); }
       return;
     }
     if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") {
@@ -358,6 +373,7 @@ function renderEditor(f) {
       openFrameAt(f.clip, f.t + ((ev.key === "e" || ev.key === "E") ? 1 : -1) * _step(), LB.mode);
     }
   };
+  ED.keydown = document.onkeydown; ED.keyup = document.onkeyup;   // 같은 클립 재진입(ED 재사용) 때 다시 걸기 위해 보관
 }
 
 // 재생바: 1초 · 10초 단위 이동 + 슬라이더 + 초 직접 입력 + 저장 상태
@@ -422,9 +438,12 @@ function drawTrack(track, f) {
     g += `<rect x="${x0}" y="0" width="${Math.max(x1 - x0, 1)}" height="${H}" fill="#3fb95033"/>`;
     g += `<line x1="${px(fs.start)}" y1="0" x2="${px(fs.start)}" y2="${H}" stroke="#3fb950" stroke-width="2"/>`;
   });
-  shotSecs(f.stem).forEach(([sec]) => {
-    g += `<line x1="${px(sec)}" y1="${H - 7}" x2="${px(sec)}" y2="${H}" stroke="#e6edf3cc" stroke-width="1.4"/>`;
+  const kinds = shotKinds(f.stem);   // 흰=손라벨 박스 · 파랑=검토완료(빈) · 노랑=지금 보는 프레임
+  Object.keys(kinds).forEach(k => {
+    const sec = +k, col = kinds[k] === "box" ? "#e6edf3cc" : "#58a6ff";
+    g += `<line x1="${px(sec)}" y1="${H - 7}" x2="${px(sec)}" y2="${H}" stroke="${col}" stroke-width="1.4"/>`;
   });
+  g += `<line x1="${px(f.t)}" y1="0" x2="${px(f.t)}" y2="${H}" stroke="#d29922" stroke-width="1.6"/>`;
   track.innerHTML = g + "</svg>";
 }
 
@@ -467,3 +486,26 @@ function renderShotRow(row, f, hooks) {
   });
 }
 
+
+
+// 단축키 도움말 (? 로 토글)
+function toggleHelp() {
+  let h = document.getElementById("kbdHelp");
+  if (h) { h.remove(); return; }
+  h = document.createElement("div"); h.id = "kbdHelp";
+  h.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:50;background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:12px 16px;font-size:12px;line-height:1.9;box-shadow:0 8px 24px #0008;min-width:260px";
+  h.innerHTML = '<div style="font-weight:800;margin-bottom:4px">단축키 <span style="color:var(--mut);font-weight:400">(? 닫기)</span></div>' +
+    [["좌클릭 드래그", "불 박스 (사람모드=사람)"], ["우클릭 드래그", "연기 박스 · 기존 박스 위에 새로"], ["Shift+드래그", "기존 박스 위에 새 박스"],
+     ["박스 클릭 → Del", "삭제"], ["박스 클릭 → 1 / 2", "불 / 연기로 클래스 변경"], ["C", "이전 프레임 박스 복사"],
+     ["Ctrl+Z / Ctrl+Shift+Z", "되돌리기 / 다시"], ["W / E, ← / →", "이전 / 다음 프레임"], ["Shift+← / →", "10초"],
+     ["휠", "확대·축소"], ["Space+드래그", "확대 화면 이동"], ["빈 곳 클릭", "현재 상태 저장(빈 프레임=검토완료)"]]
+      .map(([k, v]) => `<div><kbd style="background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:0 6px;font-family:ui-monospace,Menlo,monospace">${k}</kbd> <span style="color:var(--mut)">${v}</span></div>`).join("");
+  document.body.appendChild(h);
+}
+
+// 초별 라벨 종류: "box"=손라벨 박스 있음 · "empty"=검토완료(박스 0, cls -1 마커)
+function shotKinds(clip) {
+  const S = _labelStore(); const by = {};
+  if (S) S.filter(r => r.clip === clip).forEach(r => { const k = Math.round(r.t * 2) / 2; by[k] = (by[k] === "box" || r.cls >= 0) ? "box" : "empty"; });
+  return by;
+}

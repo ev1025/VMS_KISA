@@ -21,6 +21,10 @@ async function buildDatasetSrc() {
     b.onclick = () => { if (DS_KIND === k) return; DS_KIND = k; DS_SEL = null; buildDatasetSrc(); };
     kb.appendChild(b);
   });
+  const cb = el("button", null, "\u21bb"); cb.title = "서버 폴더 캐시 새로고침(데이터 폴더를 옮기거나 이름 바꾼 뒤)";
+  cb.style.cssText = "flex:0 0 30px;border-radius:6px;padding:5px 0;cursor:pointer;font-size:12px;background:var(--panel);color:var(--mut);border:1px solid var(--line)";
+  cb.onclick = async () => { cb.textContent = "\u2026"; try { await fetch("/api/refresh_cache", { method: "POST" }); } catch (e) {} SOURCES = null; DSMETA = null; buildDatasetSrc(); };
+  kb.appendChild(cb);
   // 드롭다운은 고른 쪽만
   if (DS_KIND === "raw") {
     $(".srcbox label").textContent = "원본 카테고리";
@@ -60,6 +64,20 @@ async function renderRawList(cat) {
   catch (e) { box.innerHTML = '<div class="empty">이 카테고리를 못 읽었습니다</div>'; return; }
   const shownImg = r.img_total > r.images.length ? ` (표시 ${r.images.length})` : "";
   box.innerHTML = "";
+  // 요약 패널: 총수·표본 라벨률·클래스 분포·규약 경고 (/api/clipstat 는 목록 표본만 읽어 빠르다)
+  const sum = el("div"); sum.style.cssText = "margin:0 0 6px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:11px;line-height:1.6;color:var(--mut)";
+  sum.innerHTML = `이미지 <b style="color:var(--tx)">${r.img_total.toLocaleString()}</b> · 영상 <b style="color:var(--tx)">${r.vid_total}</b>${shownImg}`;
+  box.appendChild(sum);
+  fetch("/api/clipstat?src=" + encodeURIComponent(cat)).then(x => x.json()).then(st => {
+    const cls = Object.entries(st.classes || {}).sort().map(([k, v]) => `${k}:${v}`).join(" ");
+    sum.innerHTML += `<br>표본 ${st.sample}장 중 라벨 <b style="color:var(--tx)">${st.labeled}</b> · 박스 ${st.boxes}` + (cls ? ` · 클래스 <span style="font-family:ui-monospace,Menlo,monospace">${cls}</span>` : "") +
+      (st.note ? `<br><span style="color:#d29922;font-weight:700">⚠ ${st.note}</span>` : "");
+  }).catch(() => {});
+  // 검색 필터(파일명 부분일치, 클라이언트)
+  const fi = el("input"); fi.type = "search"; fi.placeholder = "파일명 검색…";
+  fi.style.cssText = "width:100%;box-sizing:border-box;margin:0 0 6px;padding:5px 8px;border-radius:6px;background:var(--panel);color:var(--tx);border:1px solid var(--line);font-size:11px";
+  fi.oninput = () => { const k = fi.value.trim().toLowerCase(); box.querySelectorAll(".item").forEach(it => { const nm = it.querySelector(".nm"); it.hidden = !!k && !((nm && (nm.title || nm.textContent) || "").toLowerCase().includes(k)); }); };
+  box.appendChild(fi);
   if (!r.images.length && !r.videos.length) {
     box.innerHTML = '<div class="empty">이 폴더엔 이미지·영상이 없습니다<br><small>압축 상태이거나 라벨 파일만 있는 폴더</small></div>';
     return;

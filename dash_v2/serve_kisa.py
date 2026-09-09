@@ -554,7 +554,9 @@ class H(BaseHTTPRequestHandler):
                 self.send_error(404, "category not found"); return
             lab = 0; cls = {}; boxes = 0
             for rel in got["images"]:
-                lp = raw_sibling_label(rel)
+                lp = (G / rel).with_suffix(".txt")            # 1) 이미지 옆 YOLO txt (산불 frames 등)
+                if not lp.is_file():
+                    lp = raw_sibling_label(rel)                # 2) 다른 트리(labels/) 에 있는 경우
                 if lp is None or not lp.is_file():
                     continue
                 lab += 1
