@@ -4,8 +4,8 @@ const el = (t, c, h) => { const e = document.createElement(t); if (c) e.classNam
 const fmt = s => s == null ? "-" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const BEFORE = 2, AFTER = 10;
 
-let META = null, LABELS = null;
-let CUR = { item: "fire", name: null, mode: "review" };
+let META = null, LABELS = null, PLABELS = null;
+let CUR = { item: "fire", name: null, mode: "data" };   // 첫 화면 = 데이터 확인
 let FILT = "all", VID = null;
 
 // ---------- 예측 알람 시각 (대시보드는 대표 규칙 하나로 표시) ----------
@@ -396,7 +396,7 @@ function renderLabels(r, row) {
 }
 
 // ---------- 데이터 확인 탭 ----------
-let DSMETA = null, DS_CUR = null, DS_ONLY_LABELED = false, DS_SEL = null, DS_KIND = "raw";   // raw=원본, ds=학습
+let DSMETA = null, DS_CUR = null, DS_ONLY_LABELED = false, DS_SEL = null, DS_KIND = "raw", DS_EDIT = false;   // raw=원본, ds=학습
 async function buildDatasetSrc() {
   if (!DSMETA) DSMETA = await (await fetch("/api/dataset")).json();
   if (!SOURCES) { try { SOURCES = await (await fetch("/api/sources")).json(); } catch (e) { SOURCES = []; } }
@@ -447,6 +447,7 @@ function pickDataSrc(v) {
 
 // ---------- 원본데이터 둘러보기 (이미지·영상 원재료) ----------
 async function renderRawList(cat) {
+  DS_EDIT = true;   // 카테고리 새로 고르면 편집가능 항목은 라벨편집부터(catMode 가 none 이면 자동으로 재생)
   const box = $("#list"); box.innerHTML = '<div class="empty">불러오는 중…</div>';
   $("#center").innerHTML = '<div class="empty">항목을 선택하세요</div>';
   $("#right").innerHTML = '<div class="empty">—</div>';
@@ -460,16 +461,13 @@ async function renderRawList(cat) {
     return;
   }
   if (r.images.length) {
-    const grid = el("div"); grid.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px";
     r.images.forEach(rel => {
-      const tw = el("div"); tw.style.cssText = "position:relative;cursor:pointer;border-radius:5px;overflow:hidden;border:1px solid var(--line);aspect-ratio:16/10;background:#000";
-      const t = el("img"); t.loading = "lazy"; t.style.cssText = "width:100%;height:100%;object-fit:cover";
-      t.src = "/dsimg/" + rel.split("/").map(encodeURIComponent).join("/");
-      tw.appendChild(t);
-      tw.onclick = () => showRawImage(rel);
-      grid.appendChild(tw);
+      const it = el("div", "item");
+      const nm = el("span", "nm", rel.split("/").pop()); nm.title = rel; nm.style.userSelect = "text"; nm.style.cursor = "text";
+      it.appendChild(nm);
+      it.onclick = () => { if (window.getSelection && String(window.getSelection())) return; showRawImage(rel); };
+      box.appendChild(it);
     });
-    box.appendChild(grid);
     showRawImage(r.images[0]);
   }
   if (r.videos.length) {
@@ -479,10 +477,10 @@ async function renderRawList(cat) {
       if (_vn) { const _vb = el("span", null, String(_vn)); _vb.style.cssText = "flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:18px;padding:0 6px;border-radius:6px;font:700 11px/1 ui-monospace,Menlo,monospace;color:#cfe4ff;background:#58a6ff22;border:1px solid #58a6ff55;margin-right:6px"; it.appendChild(_vb); }
       const nm = el("span", "nm", rel.split("/").pop()); nm.title = rel; nm.style.userSelect = "text"; nm.style.cursor = "text";
       it.appendChild(nm);
-      it.onclick = () => { if (window.getSelection && String(window.getSelection())) return; showRawVideo(rel); };
+      it.onclick = () => { if (window.getSelection && String(window.getSelection())) return; openClip(rel); };
       box.appendChild(it);
     });
-    if (!r.images.length) showRawVideo(r.videos[0]);
+    if (!r.images.length) openClip(r.videos[0]);
   }
 }
 
@@ -528,15 +526,49 @@ async function showRawImage(rel) {
   r.appendChild(KV("라벨(기존 GT)", boxes.length ? boxes.length + "박스" : "없음"));
 }
 
+// 카테고리로 편집 모드 판정: fire / person / none
+function catMode(rel) {
+  const cat = (rel || "").split("/")[2] || "";
+  if (/검증|채점|배포/.test(cat)) return "none";
+  if (/방화|산불/.test(cat)) return "fire";
+  if (/사람|침입|쓰러짐|배회|스토킹/.test(cat)) return "person";
+  return "none";
+}
+// 라벨편집 진입: 에디터 열고 우측을 '영상 보기' 버튼으로
+function openEditorFor(rel) {
+  const clip = rel.replace("data/원본데이터/", "").replace(".mp4", "");
+  const mode = catMode(rel);
+  DS_EDIT = true;
+  openFrameAt(clip, null, mode);
+  const r = $("#right"); r.innerHTML = "";
+  r.appendChild(el("div", "rtitle", mode === "person" ? "사람 라벨 편집" : "라벨 편집"));
+  const vb = el("button", null, "\u25B6 영상 보기");
+  vb.style.cssText = "width:100%;margin-bottom:10px;padding:8px;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px;background:var(--panel2);color:var(--tx);border:1px solid var(--blue)";
+  vb.onclick = () => { DS_EDIT = false; showRawVideo(rel); };
+  r.appendChild(vb);
+  const KVs = (k, val) => { const d = el("div"); d.style.cssText = "padding:6px 0;border-bottom:1px solid var(--line)"; const t = el("div", "", k); t.style.cssText = "color:var(--mut);font-size:11px;margin-bottom:2px"; const vv = el("div", "", val); vv.style.cssText = "font-family:ui-monospace,Menlo,monospace;font-size:11px;word-break:break-all;line-height:1.45"; d.appendChild(t); d.appendChild(vv); return d; };
+  r.appendChild(KVs("파일", rel.split("/").pop()));
+}
+// 좌측 영상 클릭: 편집 중이면 그 영상 편집 유지, 아니면 재생
+function openClip(rel) {
+  showRawVideo(rel);   // showRawVideo 가 DS_EDIT 를 보고 에디터/영상 결정
+}
 // 원본 영상 한 편. XML 정답(이벤트 시각)이 있으면 같이 보여준다.
 async function showRawVideo(rel) {
   const clip = rel.replace(/^data\/원본데이터\//, "").replace(/\.mp4$/, "");
   let events = [], dur = 0, ci = null;
   try { ci = await (await fetch("/api/clipinfo?clip=" + encodeURIComponent(clip))).json(); dur = ci.dur || 0; events = ci.fire || []; } catch (e) {}
   const first = events[0] || {};
-  // 영상은 영상검수와 동일한 플레이어(renderCenter)를 그대로 재사용한다.
-  renderCenter({ video: rel, name: rel.split("/").pop(), signal_type: "raw", signal: [], zone: [], tracks: null,
-                 weather: [], tod: null, gt: (first.start != null ? first.start : null), gt_dur: first.dur || 0, sa: null });
+  document.onkeydown = null;
+  const _mode0 = catMode(rel);
+  const _editing = DS_EDIT && _mode0 !== "none";
+  if (_editing) {
+    openFrameAt(clip, first.start != null ? first.start : null, _mode0);   // 편집 중 = 중앙은 에디터
+  } else {
+    ED = null;   // 영상 볼 땐 에디터 재사용상태 초기화(다음 라벨편집이 새로 그리게)
+    renderCenter({ video: rel, name: rel.split("/").pop(), signal_type: "raw", signal: [], zone: [], tracks: null,
+                   weather: [], tod: null, gt: (first.start != null ? first.start : null), gt_dur: first.dur || 0, sa: null });
+  }
   // 우측 정보(파일/경로/정답)
   const r = $("#right"); r.innerHTML = "";
   r.appendChild(el("div", "rtitle", "영상 정보"));
@@ -555,15 +587,14 @@ async function showRawVideo(rel) {
     events.forEach((fs, i) => r.appendChild(KV(events.length > 1 ? `정답 ${i + 1}` : "정답", `${fmt(fs.start)} · ${fs.dur}초간`)));
     if (!events.length) r.appendChild(KV("정답", "XML 없음"));
   } else r.appendChild(KV("정답", "정보 없음"));
-  // 방화/산불 클립이면 라벨생성 탭과 동일한 에디터로 바로 진입 (기존 GT는 안 건드리고 손라벨만 추가)
+  // 라벨 대상 클립이면 버튼: 편집중=영상보기 / 아니면 라벨편집 (영상정보는 그대로)
   const _stem = stemOf(clip);
-  const _cat = rel.split("/")[2] || "";
-  if (/방화|산불/.test(_cat) && !/검증|채점|배포/.test(_cat)) {
-    const _n = labeledCount(_stem);
-    r.appendChild(KV("손라벨", _n ? _n + "프레임" : "없음"));
-    const _eb = el("button", null, "라벨 편집");
-    _eb.style.cssText = "width:100%;margin-top:10px;padding:8px;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px;background:var(--blue);color:#06090f;border:1px solid var(--blue)";
-    _eb.onclick = () => openFrameAt(clip, first.start != null ? first.start : null);
+  if (_mode0 !== "none") {
+    { const _n = labeledCount(_stem); r.appendChild(KV("손라벨", _n ? _n + "프레임" : "없음")); }   // fire·person 둘 다
+    const _eb = el("button", null, _editing ? "\u25B6 영상 보기" : "라벨 편집");
+    _eb.style.cssText = "width:100%;margin-top:10px;padding:8px;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px;" +
+      (_editing ? "background:var(--panel2);color:var(--tx);border:1px solid var(--blue)" : "background:var(--blue);color:#06090f;border:1px solid var(--blue)");
+    _eb.onclick = () => { DS_EDIT = !_editing; showRawVideo(rel); };
     r.appendChild(_eb);
   }
 }
@@ -677,21 +708,28 @@ function applyMode() {
 let CLIPS = null, SOURCES = null, LB = { cat: null, clip: null, sec: 0, boxes: [], file: null };
 const stemOf = pathStr => String(pathStr).split("/").pop();   // 라벨은 파일 이름(stem)으로 묶인다
 
-// 이미 손라벨된 프레임의 박스(프리필용). fire_labels 에서 같은 clip + 같은 초를 찾는다.
+// 현재 편집 모드의 라벨 저장소(person 이면 PLABELS, 아니면 LABELS)
+function _labelStore() { return (LB.mode === "person") ? PLABELS : LABELS; }
+// 이미 손라벨된 프레임의 박스(프리필용). 같은 clip + 같은 초를 찾는다.
 function existingBoxes(clip, t) {
-  if (!LABELS) return null;
-  const rs = LABELS.filter(r => r.clip === clip && Math.round(r.t) === Math.round(t));
-  return rs.length ? rs.map(r => [r.cls, r.x, r.y, r.w, r.h]) : null;
+  const S = _labelStore(); if (!S) return null;
+  const rs = S.filter(r => r.clip === clip && Math.abs(Number(r.t) - t) < 0.25);   // 0.5초(2FPS) 프레임을 정수반올림하면 63.5/64.0 이 충돌 → 허용오차로 정확히 매칭
+  if (!rs.length) return null;                                          // 저장 기록 자체가 없음 → 의사라벨 프리필 대상
+  return rs.filter(r => r.cls >= 0).map(r => [r.cls, r.x, r.y, r.w, r.h]);   // 기록은 있는데 박스 0개(cls -1 마커)=검토완료 → 빈 배열(프리필 안 함)
 }
-
-// 그 클립에서 라벨해 둔 초 목록(참조 샷). 재생바 아래 한 줄로 보여준다.
+// 그 클립에서 라벨해 둔 초 목록(참조 샷).
 function shotSecs(clip) {
-  if (!LABELS) return [];
+  const S = _labelStore(); if (!S) return [];
   const by = {};
-  LABELS.filter(r => r.clip === clip).forEach(r => { const s = Math.round(r.t); by[s] = (by[s] || 0) + 1; });
+  S.filter(r => r.clip === clip && r.cls >= 0).forEach(r => { const s = Math.round(r.t); by[s] = (by[s] || 0) + 1; });
   return Object.keys(by).map(Number).sort((a, b) => a - b).map(s => [s, by[s]]);
 }
-function labeledCount(clip) { return shotSecs(clip).length; }
+// 목록 배지는 항상 화재(LABELS) 기준 — 편집모드에 안 흔들리게
+function labeledCount(clip) {
+  const by = {};   // fire(LABELS)·person(PLABELS) 어느 쪽 손라벨이든 그 클립의 프레임 수를 센다
+  for (const S of [LABELS, PLABELS]) { if (S) S.filter(r => r.clip === clip && r.cls >= 0).forEach(r => { by[Math.round(r.t)] = 1; }); }
+  return Object.keys(by).length;
+}
 
 // 클립 원본 영상 정보(fps·길이·해상도). 클립당 한 번만 조회해 캐시한다.
 let ED = null;        // 지금 열려 있는 편집기(같은 클립이면 재사용해 깜빡임을 없앤다)
@@ -763,7 +801,12 @@ function labelEmptyCenter() {
 }
 
 // 그 초의 프레임을 편집기에 띄운다. 라벨 단위가 1초라 sec 는 정수로 맞춘다.
-async function openFrameAt(clip, sec) {
+function _step() { return LB.mode === "person" ? 0.5 : 1; }   // person(침입쓰러짐)=0.5초(2FPS)
+function _disp(sec) { return LB.mode === "person" ? Math.round(sec * 2) : sec; }   // 사람: 화면엔 정수 프레임번호(초×2)
+function _undisp(v) { return LB.mode === "person" ? v / 2 : v; }
+async function openFrameAt(clip, sec, mode) {
+  LB.mode = mode || LB.mode || "fire";
+  if (LB.mode === "person" && !PLABELS) { try { PLABELS = await (await fetch("/api/labels?kind=person")).json(); } catch (e) { PLABELS = []; } }
   let ci;
   try { ci = await clipInfo(clip); }
   catch (e) { $("#center").innerHTML = '<div class="empty">이 영상 정보를 못 읽었습니다</div>'; return; }
@@ -771,12 +814,15 @@ async function openFrameAt(clip, sec) {
   // 초를 안 주면 XML 의 화재 발생 시각으로 간다(0초부터 뒤질 일이 없다)
   if (sec == null) sec = (ci.fire && ci.fire.length) ? ci.fire[0].start : 0;
   const savedAt = s2 => existingBoxes(stemOf(clip), s2);
-  sec = Math.min(Math.max(Math.round(sec), 0), last);
+  const _q = LB.mode === "person" ? 2 : 1; sec = Math.min(Math.max(Math.round(sec * _q) / _q, 0), last);   // person 은 0.5초 단위로 반올림
   LB.clip = clip; LB.sec = sec;
+  let saved = savedAt(sec);
+  if (LB.mode === "person" && !saved) {
+    try { const pj = await (await fetch("/api/pseudolabel?clip=" + encodeURIComponent(clip) + "&t=" + sec)).json(); if (pj.boxes && pj.boxes.length) saved = pj.boxes; } catch (e) {}
+  }
   const url = `/frameat?clip=${encodeURIComponent(clip)}&t=${sec}`;
   if (ED && ED.clip === clip) {
     // 화면을 지우지 않는다. 새 그림을 다 받은 뒤 바꿔 끼우면 사라졌다 나타나는 깜빡임이 없다.
-    const saved = savedAt(sec);
     const n = ++loadSeq;
     const pre = new Image();
     pre.onload = pre.onerror = () => { if (n === loadSeq) ED.applyFrame(sec, url, saved); };
@@ -788,12 +834,12 @@ async function openFrameAt(clip, sec) {
     clip, stem: stemOf(clip), src: clip + ".mp4", t: sec, last, W: ci.W, H: ci.H,
     file: `${stemOf(clip)}_${String(sec).padStart(4, "0")}.png`,   // 저장 기록용 이름(학습셋은 원본에서 다시 뽑는다)
     url,
-    saved: savedAt(sec),
+    saved: saved,
   });
 }
 
 function rectSvg(x, y, w, h, cls, dash, on) {
-  const stroke = cls ? "#a371f7" : "#f85149";
+  const stroke = (LB.mode === "person") ? "#3fb950" : (cls ? "#a371f7" : "#f85149");
   return `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${on ? stroke + '22' : 'none'}" stroke="${stroke}" stroke-width="${on ? 6 : 3}" ${dash ? 'stroke-dasharray="8 5"' : ''}/>`;
 }
 
@@ -802,20 +848,31 @@ function renderEditor(f) {
   LB.boxes = f.saved ? f.saved.map(b => b.slice()) : [];
   const c = $("#center"); c.innerHTML = "";
   // 이미지 + 그리기 오버레이 (이미지 위에는 아무 글자도 얹지 않는다)
-  const pane = el("div"); pane.style.cssText = `width:100%;max-width:min(${f.W}px, calc((100vh - 320px) * 16 / 9));margin:auto;padding:12px 8px 0`;
+  const pane = el("div"); pane.style.cssText = `width:100%;max-width:min(${f.W}px, calc((100vh - 400px) * 16 / 9));margin:auto;padding:12px 8px 0`;
   c.appendChild(pane);
   const wrap = el("div"); wrap.style.cssText = "position:relative";
   const img = el("img"); img.src = f.url; img.style.cssText = "width:100%;display:block;border-radius:6px;-webkit-user-drag:none";
   const ov = el("div"); ov.style.cssText = "position:absolute;inset:0;cursor:crosshair";
   wrap.appendChild(img); wrap.appendChild(ov); pane.appendChild(wrap);
-  // 휠 = 프레임 확대/축소(1~6x). 페이지 스크롤 대신 이미지 줌.
-  let _zoom = 1, _baseW = 0;
-  c.style.overflow = "auto";
+  // 휠 = 프레임 확대/축소(1~8x). 커서 기준, 프레임 박스 안에서만 확대(주변 레이아웃 안 밀림).
+  wrap.style.overflow = "hidden";
+  let _zoom = 1, _tx = 0, _ty = 0;   // origin 0 0 고정 + translate 로 커서 밑 지점을 붙잡아 누적 확대해도 안 튄다
+  const _applyZoom = () => {
+    const t = "translate(" + _tx + "px," + _ty + "px) scale(" + _zoom + ")";
+    img.style.transformOrigin = "0 0"; img.style.transform = t;
+    ov.style.transformOrigin = "0 0"; ov.style.transform = t;
+  };
   ov.addEventListener("wheel", ev => {
     ev.preventDefault();
-    if (!_baseW) _baseW = wrap.getBoundingClientRect().width || f.W;
-    _zoom = Math.min(Math.max(_zoom * (ev.deltaY < 0 ? 1.15 : 1 / 1.15), 1), 6);
-    pane.style.maxWidth = Math.round(_baseW * _zoom) + "px";
+    const rc = wrap.getBoundingClientRect();
+    const cx = ev.clientX - rc.left, cy = ev.clientY - rc.top, z0 = _zoom;
+    _zoom = Math.min(Math.max(_zoom * (ev.deltaY < 0 ? 1.15 : 1 / 1.15), 1), 8);
+    _tx = cx - (_zoom / z0) * (cx - _tx);   // 지금 커서 밑에 있는 지점이 확대 후에도 커서 아래 그대로
+    _ty = cy - (_zoom / z0) * (cy - _ty);
+    _tx = Math.min(0, Math.max(rc.width * (1 - _zoom), _tx));   // 박스 밖 빈공간 방지
+    _ty = Math.min(0, Math.max(rc.height * (1 - _zoom), _ty));
+    if (_zoom === 1) { _tx = 0; _ty = 0; }
+    _applyZoom();
   }, { passive: false });
 
   // 재생바(1초 단위) + 그 아래 참조 샷 한 줄
@@ -867,7 +924,7 @@ function renderEditor(f) {
   const saveNow = async () => {
     try {
       const res = await postLabel(f.stem, f.t, f.W, f.H, LB.boxes, f.src);
-      f.saved = LB.boxes.map(b => b.slice()); LABELS = res.labels || LABELS;
+      f.saved = LB.boxes.map(b => b.slice());
       renderClipList();          // 좌측 클립 목록의 라벨 장수 갱신
       fillShots();               // 참조 샷 줄에 이 초를 반영
       saveState = ""; draw();
@@ -875,7 +932,7 @@ function renderEditor(f) {
   };
   // 드래그로 박스: 좌버튼=불(0), 우버튼=연기(1), 그리는 즉시 자동저장
   // 이미 있는 박스는 변·모서리 근처를 잡아 크기를 고친다(핸들은 그리지 않는다).
-  let st = null, curCls = 0, rz = null, mv = null, sel = null;   // sel = 마우스로 잡은 박스(Del 로 지울 대상), mv = 이동 중
+  let st = null, curCls = 0, rz = null, mv = null, sel = null, pan = null, _space = false;   // sel=Del대상, mv=이동, pan=스페이스드래그 화면이동
   const HIT = 8;                       // 화면 기준 8px 안이면 그 변을 잡은 것으로 본다
   const CURSOR = { n: "ns-resize", s: "ns-resize", w: "ew-resize", e: "ew-resize", nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize" };
   const toImg = ev => { const rc = img.getBoundingClientRect(); return { x: (ev.clientX - rc.left) / rc.width * f.W, y: (ev.clientY - rc.top) / rc.height * f.H }; };
@@ -926,6 +983,7 @@ function renderEditor(f) {
   ov.oncontextmenu = ev => ev.preventDefault();   // 우클릭 메뉴 차단(연기 그리기용)
   ov.onmousedown = ev => {
     ev.preventDefault();
+    if (_space) { pan = { sx: ev.clientX, sy: ev.clientY, tx0: _tx, ty0: _ty }; ov.style.cursor = "grabbing"; return; }   // 스페이스+드래그 = 확대이미지 이동
     const p = toImg(ev);
     const h = ev.button === 2 || ev.shiftKey ? null : hitTest(p);   // 우클릭·Shift 는 언제나 새 박스
     if (h) { rz = h; sel = h.i; return; }
@@ -937,9 +995,15 @@ function renderEditor(f) {
         sel = u; return;
       }
     }
-    curCls = ev.button === 2 ? 1 : 0; st = p;
+    curCls = (LB.mode === "person") ? 0 : (ev.button === 2 ? 1 : 0); st = p;
   };
   ov.onmousemove = ev => {
+    if (pan) {
+      const rc = wrap.getBoundingClientRect();
+      _tx = Math.min(0, Math.max(rc.width * (1 - _zoom), pan.tx0 + (ev.clientX - pan.sx)));
+      _ty = Math.min(0, Math.max(rc.height * (1 - _zoom), pan.ty0 + (ev.clientY - pan.sy)));
+      _applyZoom(); return;
+    }
     const p = toImg(ev);
     if (rz) { resizeTo(p); draw(); return; }
     if (mv) { moveTo(p); draw(); return; }
@@ -948,18 +1012,19 @@ function renderEditor(f) {
     ov.style.cursor = h ? (CURSOR[h.tag] || "crosshair") : "crosshair";
     const u = h ? h.i : boxUnder(p);
     if (!h && u !== null) ov.style.cursor = "move";
-    if (u !== sel) { sel = u; }        // 호버로는 박스를 굵게 하지 않는다(sel 은 Del 대상만 추적)
+    // 호버로는 sel 을 바꾸지 않는다 — 클릭으로 잡은 Del 대상이 마우스 이동에 풀리면 안 됨
   };
   const finish = ev => {
+    if (pan) { pan = null; ov.style.cursor = _space ? "grab" : "crosshair"; return; }   // 이동 끝
     if (rz) { rz = null; draw(); saveNow(); return; }      // 크기조절 끝 → 그 자리에서 저장
     if (mv) { mv = null; draw(); saveNow(); return; }      // 이동 끝 → 그 자리에서 저장
     if (!st) return; const p = toImg(ev);
     const x = Math.min(st.x, p.x), y = Math.min(st.y, p.y), w = Math.abs(p.x - st.x), h = Math.abs(p.y - st.y); st = null;
     if (w > 4 && h > 4) { LB.boxes.push([curCls, x / f.W, y / f.H, w / f.W, h / f.H]); draw(); saveNow(); }
-    else draw();
+    else { draw(); saveNow(); }   // 박스 안 쳐도 프레임 안쪽 클릭이면 현재 상태 저장(빈 라벨=검토완료)
   };
   ov.onmouseup = finish;
-  ov.onmouseleave = ev => { finish(ev); if (sel !== null) { sel = null; draw(); } };
+  ov.onmouseleave = ev => { finish(ev); };   // sel 유지 → 박스 클릭 후 마우스 나가도 Del 됨
   drawRef = draw;
   img.onload = () => draw(); if (img.complete) draw();
   // 같은 클립의 다른 초로 넘어갈 때는 이 함수만 부른다(DOM 을 다시 만들지 않는다)
@@ -972,12 +1037,14 @@ function renderEditor(f) {
       LB.boxes = saved ? saved.map(b => b.slice()) : [];
       sel = null; st = null; rz = null; mv = null;
       img.src = url;                     // 미리 받아둔 그림이라 즉시 바뀐다
-      bar.sl.value = sec; bar.num.value = sec;
+      bar.sl.value = _disp(sec); bar.num.value = _disp(sec);
       fillShots(); draw();
     },
   };
-  // 키보드: Ctrl+Z 취소 · ←/→ 1초 · Shift+←/→ 10초
+  // 키보드: Ctrl+Z 취소 · ←/→ 또는 W/E 1초 · Shift+←/→ 10초
+  document.onkeyup = ev => { if (ev.code === "Space") { _space = false; if (!pan) ov.style.cursor = "crosshair"; } };
   document.onkeydown = ev => {
+    if (ev.code === "Space") { ev.preventDefault(); _space = true; if (!pan) ov.style.cursor = "grab"; return; }   // 스페이스=이동 모드(드래그로 확대이미지 이동)
     if ((ev.ctrlKey || ev.metaKey) && (ev.key === "z" || ev.key === "Z")) { ev.preventDefault(); if (LB.boxes.length) { LB.boxes.pop(); draw(); saveNow(); } return; }
     if (ev.key === "Delete" || ev.key === "Backspace") {
       ev.preventDefault();
@@ -986,7 +1053,11 @@ function renderEditor(f) {
     }
     if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") {
       ev.preventDefault();
-      openFrameAt(f.clip, f.t + (ev.key === "ArrowLeft" ? -1 : 1) * (ev.shiftKey ? 10 : 1));
+      openFrameAt(f.clip, f.t + (ev.key === "ArrowLeft" ? -1 : 1) * (ev.shiftKey ? 10 : _step()), LB.mode);
+    }
+    if (ev.key === "w" || ev.key === "W" || ev.key === "e" || ev.key === "E") {   // W=이전 · E=다음 프레임
+      ev.preventDefault();
+      openFrameAt(f.clip, f.t + ((ev.key === "e" || ev.key === "E") ? 1 : -1) * _step(), LB.mode);
     }
   };
 }
@@ -998,28 +1069,28 @@ function buildFrameBar(f, status) {
   const btn = (txt, d, title) => {
     const b = el("button", null, txt);
     b.title = title; b.style.width = "auto"; b.style.padding = "0 9px";
-    b.onclick = () => openFrameAt(f.clip, f.t + d);   // f 는 계속 갱신되는 같은 객체다
+    b.onclick = () => openFrameAt(f.clip, f.t + (Math.abs(d) === 1 ? d * _step() : d));   // ±1 버튼은 모드 스텝(person 0.5)
     return b;
   };
   bar.appendChild(btn("◀◀10", -10, "10초 뒤로"));
   bar.appendChild(btn("◀", -1, "1초 뒤로"));
   const num = el("input");
   // type=number 는 브라우저가 위아래 화살표를 붙인다 → text + 숫자 키패드로 바꿔 화살표를 없앤다
-  num.type = "text"; num.inputMode = "numeric"; num.value = f.t;
-  num.style.cssText = "width:56px;align-self:stretch;box-sizing:border-box;background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:2px 8px;font-size:16px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;text-align:right";
-  num.onchange = () => openFrameAt(f.clip, Math.floor(+num.value));
+  num.type = "text"; num.inputMode = "numeric"; num.value = _disp(f.t);
+  num.style.cssText = "width:56px;align-self:stretch;box-sizing:border-box;background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:2px 8px;font-size:15px;font-weight:400;line-height:1;font-variant-numeric:tabular-nums;text-align:center";
+  num.onchange = () => openFrameAt(f.clip, _undisp(+num.value));   // 사람은 정수 프레임번호 입력 → 초로 환산
   const slWrap = el("div", "frbar");
   const tk = el("div", "tk");          // 정답 구간·라벨 눈금이 그려지는 슬라이더 트랙
   const sl = el("input");
-  sl.type = "range"; sl.min = 0; sl.max = f.last; sl.step = 1; sl.value = f.t;
+  sl.type = "range"; sl.min = 0; sl.max = _disp(f.last); sl.step = 1; sl.value = _disp(f.t);
   sl.oninput = () => { num.value = sl.value; };          // 끄는 동안은 숫자만 따라간다
-  sl.onchange = () => openFrameAt(f.clip, +sl.value);    // 놓을 때 그 프레임을 뽑는다
+  sl.onchange = () => openFrameAt(f.clip, _undisp(+sl.value));    // 놓을 때 그 프레임을 뽑는다
   const fire = (CLIPINFO[f.clip] && CLIPINFO[f.clip].fire) || [];
   sl.title = fire.length ? `정답 화재 발생 ${fire.map(x => x.start + "s").join(", ")} · 경보 인정 ${fire[0].dur}초` : "정답 시각 없는 클립";
   slWrap.appendChild(tk); slWrap.appendChild(sl);
   bar.appendChild(slWrap);
   bar.appendChild(num);
-  bar.appendChild(el("span", "now", `/ ${f.last}`));
+  bar.appendChild(el("span", "now", `/ ${_disp(f.last)}`));
   bar.appendChild(btn("▶", 1, "1초 앞으로"));
   bar.appendChild(btn("10▶▶", 10, "10초 앞으로"));
   bar.appendChild(status);
@@ -1029,11 +1100,12 @@ function buildFrameBar(f, status) {
 
 // 그 초의 박스를 서버에 쓴다. boxes 가 빈 배열이면 그 프레임 라벨을 지우는 것과 같다.
 async function postLabel(clip, t, W, H, boxes, src) {
+  const kind = (LB.mode === "person") ? "person" : "fire";
   const res = await (await fetch("/api/savelabel", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ clip, t, src, file: `${clip}_${String(t).padStart(4, "0")}.png`, W, H, boxes }),
+    body: JSON.stringify({ clip, t, src, file: `${clip}_${String(t).padStart(4, "0")}.png`, W, H, boxes, kind }),
   })).json();
-  LABELS = res.labels || LABELS;
+  if (kind === "person") PLABELS = res.labels || PLABELS; else LABELS = res.labels || LABELS;
   return res;
 }
 
@@ -1061,7 +1133,8 @@ function drawTrack(track, f) {
 // 참조 샷 한 줄: 이 영상에서 라벨해 둔 초들. 눌러서 그 프레임으로 넘어간다.
 function renderShotRow(row, f, hooks) {
   row.innerHTML = "";
-  row.style.cssText = "display:flex;gap:8px;overflow-x:auto;padding:12px 2px;align-items:center";
+  row.style.cssText = "display:flex;gap:8px;overflow-x:auto;padding:12px 2px;align-items:center;min-height:114px";   // 빈 상태도 높이 예약(박스 그릴 때 안 튀게)
+  row.onwheel = ev => { if (ev.deltaY) { ev.preventDefault(); row.scrollLeft += ev.deltaY; } };   // 휠 상하 → 프레임줄 좌우 스크롤
   const shots = shotSecs(f.stem);
   if (!shots.length) return;
   shots.forEach(([s, n]) => {
@@ -1099,38 +1172,49 @@ function renderShotRow(row, f, hooks) {
 // ---------- 부트 ----------
 async function buildResults() {
   const c = $("#center");
-  c.innerHTML = '<div class="empty">불러오는 중…</div>';
+  c.innerHTML = '<div class="empty">\ubd88\ub7ec\uc624\ub294 \uc911\u2026</div>';
   let data;
   try { data = await (await fetch("/api/results")).json(); }
-  catch (e) { c.innerHTML = '<div class="empty">결과를 못 읽었습니다</div>'; return; }
-  if (!data.length) { c.innerHTML = '<div class="empty">아직 채점 결과가 없습니다 (실험 진행 중)</div>'; return; }
-  const best = Math.max.apply(null, data.map(d => d.score));
+  catch (e) { c.innerHTML = '<div class="empty">\uacb0\uacfc\ub97c \ubabb \uc77d\uc5c8\uc2b5\ub2c8\ub2e4</div>'; return; }
+  const ITEMS = ["\ubc29\ud654", "\uce68\uc785", "\ubc30\ud68c", "\uc4f0\ub7ec\uc9d0"];   // KISA 4항목 고정 순서
   const wrap = el("div"); wrap.style.cssText = "padding:18px 22px;max-width:1040px;margin:0 auto;width:100%";
-  const head = el("div"); head.style.cssText = "display:flex;align-items:center;gap:10px";
-  head.appendChild(el("div", "rtitle", `실험 채점 비교 <span class="tag">${data.length}건</span> <span style="color:var(--mut);font-weight:400;font-size:11px">· 검증영상 방화 F1</span>`));
-  const rf = el("button", null, "↻ 새로고침"); rf.style.cssText = "margin-left:auto;background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer"; rf.onclick = buildResults;
+  const head = el("div"); head.style.cssText = "display:flex;align-items:center;gap:10px;margin-bottom:2px";
+  head.appendChild(el("div", "rtitle", `\uc2e4\ud5d8 \ucc44\uc810 \ube44\uad50 <span class="tag">${data.length}\uac74</span> <span style="color:var(--mut);font-weight:400;font-size:11px">\u00b7 KISA \uac80\uc99d\uc601\uc0c1 F1 (\ud56d\ubaa9\ubcc4)</span>`));
+  const rf = el("button", null, "\u21bb \uc0c8\ub85c\uace0\uce68"); rf.style.cssText = "margin-left:auto;background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer"; rf.onclick = buildResults;
   head.appendChild(rf); wrap.appendChild(head);
   const col = s => s >= 90 ? "#3fb950" : s >= 70 ? "#d29922" : "#f85149";
-  const tbl = el("table"); tbl.style.cssText = "width:100%;border-collapse:collapse;font-size:12px;margin-top:12px";
-  tbl.innerHTML = '<thead><tr style="color:var(--mut);text-align:left;font-size:11px"><th style="padding:8px 6px">실험</th><th>F1 점수</th><th>정검</th><th>미검</th><th>오검</th><th>최적 규칙</th><th>시각</th></tr></thead>';
-  const tb = el("tbody");
-  data.forEach(d => {
-    const top = d.score === best;
-    const dt = new Date(d.mtime * 1000);
-    const ds = `${dt.getMonth() + 1}/${dt.getDate()} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
-    const tr = el("tr"); tr.style.cssText = "border-top:1px solid var(--line)" + (top ? ";background:#3fb95012" : "");
-    tr.innerHTML =
-      `<td style="padding:9px 6px;font-weight:${top ? 800 : 600}">${top ? "★ " : ""}${d.name}</td>` +
-      `<td style="font-weight:800;font-size:14px;color:${col(d.score)};font-variant-numeric:tabular-nums">${d.score.toFixed(2)}</td>` +
-      `<td style="color:#3fb950;font-variant-numeric:tabular-nums">${d.tp}</td>` +
-      `<td style="color:#d29922;font-variant-numeric:tabular-nums">${d.fn}</td>` +
-      `<td style="color:#f85149;font-variant-numeric:tabular-nums">${d.fp}</td>` +
-      `<td style="color:var(--mut)">${d.rule}</td>` +
-      `<td style="color:var(--mut);font-variant-numeric:tabular-nums">${ds}</td>`;
-    tb.appendChild(tr);
+  const HEAD = '<thead><tr style="color:var(--mut);text-align:left;font-size:11px"><th style="padding:8px 6px">\uc2e4\ud5d8</th><th>F1 \uc810\uc218</th><th>\uc815\uac80</th><th>\ubbf8\uac80</th><th>\uc624\uac80</th><th>\ucd5c\uc801 \uaddc\uce59</th><th>\uc2dc\uac01</th></tr></thead>';
+  ITEMS.forEach(item => {
+    const rows = data.filter(d => d.item === item).sort((a, b) => b.score - a.score);
+    const sec = el("div"); sec.style.cssText = "margin-top:18px";
+    const st = el("div", "rtitle", `${item} <span class="tag">${rows.length}\uac74</span>`); st.style.cssText = "font-size:14px;margin-bottom:6px";
+    sec.appendChild(st);
+    if (!rows.length) {
+      sec.appendChild(el("div", "", '<div style="color:var(--mut);font-size:11px;padding:4px 2px">\ucc44\uc810 \uacb0\uacfc \uc5c6\uc74c (\uc2e4\ud5d8 \ub300\uae30)</div>'));
+      wrap.appendChild(sec); return;
+    }
+    const best = Math.max.apply(null, rows.map(d => d.score));
+    const tbl = el("table"); tbl.style.cssText = "width:100%;border-collapse:collapse;font-size:12px";
+    tbl.innerHTML = HEAD;
+    const tb = el("tbody");
+    rows.forEach(d => {
+      const top = d.score === best;
+      const dt = new Date(d.mtime * 1000);
+      const ds = `${dt.getMonth() + 1}/${dt.getDate()} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+      const tr = el("tr"); tr.style.cssText = "border-top:1px solid var(--line)" + (top ? ";background:#3fb95012" : "");
+      tr.innerHTML =
+        `<td style="padding:9px 6px;font-weight:${top ? 800 : 600}">${top ? "\u2605 " : ""}${d.name}</td>` +
+        `<td style="font-weight:800;font-size:14px;color:${col(d.score)};font-variant-numeric:tabular-nums">${d.score.toFixed(2)}</td>` +
+        `<td style="color:#3fb950;font-variant-numeric:tabular-nums">${d.tp}</td>` +
+        `<td style="color:#d29922;font-variant-numeric:tabular-nums">${d.fn}</td>` +
+        `<td style="color:#f85149;font-variant-numeric:tabular-nums">${d.fp}</td>` +
+        `<td style="color:var(--mut)">${d.rule}</td>` +
+        `<td style="color:var(--mut);font-variant-numeric:tabular-nums">${ds}</td>`;
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb); sec.appendChild(tbl); wrap.appendChild(sec);
   });
-  tbl.appendChild(tb); wrap.appendChild(tbl);
-  wrap.appendChild(el("div", "", '<div style="color:var(--mut);font-size:11px;margin-top:14px;line-height:1.7">· 점수 = 검증영상 방화 10편 F1(규칙 스윕 중 최고). 초록 ≥90 · 노랑 ≥70 · 빨강 70미만<br>· 실험이 끝나면 새로고침 버튼으로 갱신</div>'));
+  wrap.appendChild(el("div", "", '<div style="color:var(--mut);font-size:11px;margin-top:16px;line-height:1.7">\u00b7 \uc810\uc218 = KISA \uac80\uc99d\uc601\uc0c1 F1(\uaddc\uce59 \uc2a4\uc717 \uc911 \ucd5c\uace0). \ucd08\ub85d \u226590 \u00b7 \ub178\ub791 \u226570 \u00b7 \ube68\uac04 70\ubbf8\ub9cc<br>\u00b7 \uc2e4\ud5d8\uc774 \ub05d\ub098\uba74 \uc0c8\ub85c\uace0\uce68\uc73c\ub85c \uac31\uc2e0</div>'));
   c.innerHTML = ""; c.appendChild(wrap);
 }
 
@@ -1138,7 +1222,8 @@ async function buildResults() {
 async function boot() {
   META = await (await fetch("/api/meta")).json();
   try { LABELS = await (await fetch("/api/labels")).json(); } catch (e) { LABELS = null; }
+  try { PLABELS = await (await fetch("/api/labels?kind=person")).json(); } catch (e) { PLABELS = null; }   // person 라벨도 미리 로드(리스트 뱃지용)
   for (const [k, v] of Object.entries(META.items)) v.rows.forEach(row => row.item = k);
-  buildMode(); buildSrc(); buildFilt(); renderList();
+  buildMode(); applyMode();   // 시작 모드에 맞는 좌측/중앙 패널을 그린다(데이터 확인=데이터셋 패널)
 }
 boot();

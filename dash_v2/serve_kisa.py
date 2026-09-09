@@ -45,6 +45,28 @@ def data_path(*cands):
 _COCO = {}   # annotations json 경로 -> {파일명: YOLO 라벨 문자열}. 한 번만 파싱해 캐시
 
 
+def raw_sibling_label(rel):
+    """이미지와 라벨이 다른 트리에 있는 원본에서 YOLO txt 를 찾는다.
+    예: open_coco/train2017/x.jpg -> open_coco/coco/labels/train2017/x.txt
+    카테고리 루트 아래 labels/<이미지 상위폴더>/<같은 이름>.txt 를 깊이 3까지 본다(glob 이라 훑지 않는다)."""
+    _r = str(rel).replace("\\", "/")
+    if "/images/" in _r:   # YOLO 표준: .../images/x.jpg <-> .../labels/x.txt (같은 레벨)
+        cand = G / (_r.rsplit("/images/", 1)[0] + "/labels/" + Path(_r).stem + ".txt")
+        if cand.is_file():
+            return cand
+    parts = _r.split("/")
+    if len(parts) < 4 or parts[0] != "data" or parts[1] != "원본데이터":
+        return None
+    root = G / parts[0] / parts[1] / parts[2]
+    stem, parent = Path(rel).stem, parts[-2]
+    for pat in (f"labels/{parent}/{stem}.txt", f"*/labels/{parent}/{stem}.txt",
+                f"*/*/labels/{parent}/{stem}.txt", f"labels/{stem}.txt", f"*/labels/{stem}.txt"):
+        for q in root.glob(pat):
+            if q.is_file():
+                return q
+    return None
+
+
 def coco_labels(rel):
     """원본 COCO annotations(images/<split>/ + annotations/<split>.json)에서 그 이미지의 박스를
        YOLO(cls cx cy w h, 정규화) 문자열로 돌려준다. fasdd 등 test 스플릿까지 표시하려는 것."""
@@ -111,7 +133,7 @@ def sources():
     out = []
     if not RAW.is_dir():
         return out
-    for d in sorted(p for p in RAW.iterdir() if p.is_dir()):
+    for d in sorted((p for p in RAW.iterdir() if p.is_dir()), key=lambda q: (1 if "flir" in q.name.lower() else 0, q.name)):
         out.append({"key": d.name, "count": len(clips_of(d.name))})
     return out
 
@@ -135,7 +157,10 @@ def raw_items(cat, limit=600):
             for fn in files:
                 ext = os.path.splitext(fn)[1].lower()
                 if ext in IMG_EXT:
-                    imgs.append(os.path.join(dirpath, fn)[root_len:].replace("\\", "/"))
+                    _rel = os.path.join(dirpath, fn)[root_len:].replace("\\", "/")
+                    if "infrared" in _rel.lower() or "thermal" in _rel.lower():
+                        continue   # 적외선/열화상은 데이터확인 브라우징에서 제외(가시광/RGB만)
+                    imgs.append(_rel)
                 elif ext == ".mp4":
                     vids.append(os.path.join(dirpath, fn)[root_len:].replace("\\", "/"))
         imgs.sort(); vids.sort()
@@ -246,6 +271,52 @@ def read_frame(clip, sec, w=0):
     return buf.tobytes() if ok else None
 
 
+_PERSON_MODEL = None
+def person_boxes(clip, sec, conf=0.3):
+    """그 프레임에서 person 박스(YOLO 정규화 [0,cx,cy,w,h])를 person_v3(CPU)로 뽑는다. 의사라벨 프리필용."""
+    global _PERSON_MODEL
+    mp4 = under_raw(clip, ".mp4")
+    if mp4 is None or not mp4.exists():
+        return []
+    import cv2
+    cap = cv2.VideoCapture(str(mp4)); fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(int(round(float(sec) * fps)), 0))
+    ok, fr = cap.read(); cap.release()
+    if not ok:
+        return []
+    h0, w0 = fr.shape[:2]
+    if _PERSON_MODEL is None:
+        from ultralytics import YOLO
+        import torch
+        _PERSON_MODEL = YOLO(str(G / "model" / "person_v3.pt"))
+        person_boxes._dev = 0 if torch.cuda.is_available() else "cpu"
+    dev = getattr(person_boxes, "_dev", "cpu")
+    # 타일: 전체 + 4분할 + 중앙 → 멀리/작은 사람도 잡는다
+    regions = [(0, 0, w0, h0)] + [(x, y, w0 // 2, h0 // 2) for x, y in
+               ((0, 0), (w0 // 2, 0), (0, h0 // 2), (w0 // 2, h0 // 2), (w0 // 4, h0 // 4))]
+    dets = []
+    for ox, oy, rw, rh in regions:
+        r = _PERSON_MODEL.predict(fr[oy:oy + rh, ox:ox + rw], conf=conf, imgsz=640,
+                                  classes=[0], device=dev, verbose=False)[0]
+        for bb in r.boxes:
+            x1, y1, x2, y2 = (float(v) for v in bb.xyxy[0])
+            dets.append((float(bb.conf), x1 + ox, y1 + oy, x2 + ox, y2 + oy))
+    # NMS(IoU 0.5) 로 타일 중복 제거
+    def _iou(a, b):
+        ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1]); ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
+        iw = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1); inter = iw * ih
+        ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+        return inter / ua if ua > 0 else 0.0
+    dets.sort(key=lambda d: d[0], reverse=True)
+    keep = []
+    for d in dets:
+        if all(_iou(d[1:], k[1:]) < 0.5 for k in keep):
+            keep.append(d)
+    out = [[0, round(x1 / w0, 5), round(y1 / h0, 5),
+            round((x2 - x1) / w0, 5), round((y2 - y1) / h0, 5)] for _, x1, y1, x2, y2 in keep]
+    return out
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -295,7 +366,8 @@ class H(BaseHTTPRequestHandler):
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n) or b"{}")
-                fl = data_path("data/학습데이터/손라벨/fire_labels.json", "fire_labels.json")
+                fn = "person_labels.json" if body.get("kind") == "person" else "fire_labels.json"
+                fl = data_path("data/학습데이터/손라벨/" + fn, fn)
                 rows = json.load(open(fl, encoding="utf-8")) if fl.exists() else []
                 clip = body["clip"]
                 # t 는 초. 프레임 단위로 고른 것은 소수가 된다(30fps 면 0.03 초 간격).
@@ -314,6 +386,10 @@ class H(BaseHTTPRequestHandler):
                                  "x": round(float(x), 5), "y": round(float(y), 5),
                                  "w": round(float(w), 5), "h": round(float(h), 5),
                                  "W": W, "H": Hh, "crop": [0, 0, W, Hh]})
+                if not body.get("boxes") and body.get("kind") == "person":
+                    # 박스 0개로 저장(사람이 다 지움) = '검토했고 객체 없음' 마커. 이래야 다시 의사라벨 프리필 안 된다
+                    rows.append({"file": file, "clip": clip, "src": src, "t": t, "cls": -1,
+                                 "x": 0, "y": 0, "w": 0, "h": 0, "W": W, "H": Hh, "crop": [0, 0, W, Hh]})
                 tmp = fl.with_suffix(".json.tmp")
                 json.dump(rows, open(tmp, "w", encoding="utf-8"), ensure_ascii=False)
                 tmp.replace(fl)
@@ -336,8 +412,17 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/dataset":
             self._stream(HERE/"dataset_meta.json", "application/json; charset=utf-8"); return
         if p == "/api/labels":
-            f = data_path("data/학습데이터/손라벨/fire_labels.json", "fire_labels.json")
-            self._stream(f, "application/json; charset=utf-8") if f.exists() else self.send_error(404)
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            fn = "person_labels.json" if (q.get("kind") or [""])[0] == "person" else "fire_labels.json"
+            f = data_path("data/학습데이터/손라벨/" + fn, fn)
+            self._stream(f, "application/json; charset=utf-8") if f.exists() else self._bytes(b"[]", "application/json; charset=utf-8")
+            return
+        if p == "/api/pseudolabel":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            clip = (q.get("clip") or [""])[0]; t = float((q.get("t") or ["0"])[0])
+            try: boxes = person_boxes(clip, t)
+            except Exception: boxes = []
+            self._bytes(json.dumps({"boxes": boxes}).encode(), "application/json; charset=utf-8")
             return
         if p == "/api/labelmeta":
             f = data_path("data/학습데이터/손라벨/full/meta.json", "labelfull/meta.json")
@@ -404,8 +489,17 @@ class H(BaseHTTPRequestHandler):
                 if not rows:
                     continue
                 best = max(rows, key=lambda r: r["score"])
+                _s = f.stem.lower()
+                if "intrusion" in _s or "\uce68\uc785" in _s:      # 침입
+                    _item = "\uce68\uc785"
+                elif "loiter" in _s or "roam" in _s or "\ubc30\ud68c" in _s:   # 배회
+                    _item = "\ubc30\ud68c"
+                elif "fall" in _s or "faint" in _s or "collapse" in _s or "\uc4f0\ub7ec" in _s:  # 쓰러짐
+                    _item = "\uc4f0\ub7ec\uc9d0"
+                else:
+                    _item = "\ubc29\ud654"                       # 방화(기본)
                 out.append({"name": f.stem, "score": best["score"], "rule": best["rule"],
-                            "tp": best["tp"], "fn": best["fn"], "fp": best["fp"],
+                            "tp": best["tp"], "fn": best["fn"], "fp": best["fp"], "item": _item,
                             "n": len(rows), "mtime": int(f.stat().st_mtime), "rules": rows})
             out.sort(key=lambda r: -r["score"])
             self._bytes(json.dumps(out).encode("utf-8"), "application/json; charset=utf-8"); return
@@ -421,6 +515,9 @@ class H(BaseHTTPRequestHandler):
             cl = coco_labels(rel)                            # 2) 원본 COCO annotations(train/val/test 전부)
             if cl:
                 self._bytes(cl.encode("utf-8"), "text/plain; charset=utf-8"); return
+            lp = raw_sibling_label(rel)                      # 2.5) 라벨이 다른 트리에 있는 원본(open_coco 등)
+            if lp is not None:
+                self._stream(lp, "text/plain; charset=utf-8"); return
             stem = Path(rel).stem                            # 3) 변환된 학습 라벨(파일명 매칭)
             for sp in ("train", "val"):
                 for cp in (G/"data/학습데이터").glob("*/labels/" + sp + "/" + stem + ".txt"):
