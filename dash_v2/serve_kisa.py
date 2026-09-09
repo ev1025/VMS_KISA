@@ -16,7 +16,7 @@
                      (clipinfo 는 같은 이름 XML 의 화재 발생 시각도 함께 준다)
   - /frameat       : 클립의 그 초(t) 프레임 한 장을 JPEG 로 (라벨 생성에서 프레임 선택)
 """
-import json, os, re, urllib.parse
+import json, os, re, shutil, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -29,6 +29,19 @@ RAW = G / "data/원본데이터"        # 라벨 대상 영상이 카테고리 �
 PORT = 8890
 
 _CI = {}          # 클립별 fps·프레임수 캐시. 영상을 열어봐야 아는 값이라 한 번만 읽는다
+_SAVE_LOCK = threading.Lock()   # savelabel 은 read-modify-write. ThreadingHTTPServer 라 동시 저장 시 한쪽이 사라지는 걸 막는다
+
+
+def _backup_labels(fl):
+    """그날 첫 저장 전에 손라벨 JSON 스냅샷을 _backup/<이름>.<YYYYMMDD>.json 으로 남긴다(실수 복구용)."""
+    try:
+        if not fl.exists():
+            return
+        b = fl.parent / "_backup" / f"{fl.stem}.{time.strftime('%Y%m%d')}.json"
+        if not b.exists():
+            b.parent.mkdir(exist_ok=True); shutil.copyfile(fl, b)
+    except Exception:
+        pass
 _CLIPS = {}       # 카테고리별 영상 목록 캐시
 
 
@@ -128,17 +141,58 @@ def clips_of(cat):
     return rels
 
 
+CACHE_DIR = HERE / "_cache"        # 폴더 스캔 결과를 디스크에 둔다(재시작해도 16초 스캔을 다시 안 함)
+_SOURCES = None
+
+
+def _cache_read(key):
+    f = CACHE_DIR / (key + ".json")
+    try:
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+    except Exception:
+        return None
+
+
+def _cache_write(key, obj):
+    try:
+        CACHE_DIR.mkdir(exist_ok=True)
+        tmp = CACHE_DIR / (key + ".json.tmp")
+        tmp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8"); tmp.replace(CACHE_DIR / (key + ".json"))
+    except Exception:
+        pass
+
+
+def clear_caches():
+    """데이터 폴더를 옮기거나 이름을 바꾼 뒤 호출(대시보드 '캐시 새로고침' 버튼). 재시작 불필요."""
+    global _SOURCES
+    _SOURCES = None; _RAW.clear(); _CLIPS.clear(); _CI.clear()
+    shutil.rmtree(CACHE_DIR, ignore_errors=True)
+
+
 def sources():
-    """카테고리(원본데이터 1단계 폴더) 목록. count = 영상 편수(0 이면 이미지만 있는 폴더)."""
+    """카테고리(원본데이터 1단계 폴더) 목록. count = 영상 편수(0 이면 이미지만 있는 폴더).
+    첫 계산이 16초(전 카테고리 os.walk)라 메모리+디스크에 캐시한다."""
+    global _SOURCES
+    if _SOURCES is not None:
+        return _SOURCES
+    disk = _cache_read("sources")
+    if disk is not None:
+        _SOURCES = disk; return _SOURCES
     out = []
     if not RAW.is_dir():
         return out
     for d in sorted((p for p in RAW.iterdir() if p.is_dir()), key=lambda q: (1 if "flir" in q.name.lower() else 0, q.name)):
         out.append({"key": d.name, "count": len(clips_of(d.name))})
+    _SOURCES = out; _cache_write("sources", out)
     return out
 
 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+# 원본 클래스 규약이 우리(0=불,1=연기)와 다른 세트. 데이터확인 요약에 경고로 띄운다(학습셋은 리매핑돼 있음)
+RAW_CLASS_NOTE = {
+    "open_azimjaan_fire": "원본 3클래스 0=구름·1=불·2=연기 (대시보드 색은 우리 규약이라 뒤바뀌어 보임. 학습셋 azimjaan_yolo 는 리매핑)",
+    "open_dfire": "원본 0=smoke·1=fire (학습셋 dfire_yolo 에서 스왑)",
+}
 _RAW = {}          # 카테고리별 파일 목록 캐시(폴더를 한 번만 훑는다)
 
 
@@ -147,6 +201,8 @@ def raw_items(cat, limit=600):
     수만 장이면 고르게 샘플만 준다(목록이 목적이 아니라 눈으로 확인하는 게 목적)."""
     if cat in _RAW:
         got = _RAW[cat]
+    elif _cache_read("raw_" + cat) is not None:
+        got = _RAW[cat] = _cache_read("raw_" + cat)
     else:
         base = under_raw(cat)
         if base is None or not base.is_dir():
@@ -165,6 +221,7 @@ def raw_items(cat, limit=600):
                     vids.append(os.path.join(dirpath, fn)[root_len:].replace("\\", "/"))
         imgs.sort(); vids.sort()
         got = _RAW[cat] = {"images": imgs, "videos": vids}
+        _cache_write("raw_" + cat, got)
 
     def samp(a):
         if len(a) <= limit:
@@ -362,12 +419,17 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = urllib.parse.urlparse(self.path).path
+        if p == "/api/refresh_cache":            # 데이터 폴더 바뀐 뒤 서버 재시작 대신 이걸 누른다
+            clear_caches(); sources()
+            self._bytes(json.dumps({"ok": True, "sources": len(sources())}).encode(), "application/json; charset=utf-8"); return
         if p == "/api/savelabel":
+            _SAVE_LOCK.acquire()
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n) or b"{}")
                 fn = "person_labels.json" if body.get("kind") == "person" else "fire_labels.json"
                 fl = data_path("data/학습데이터/손라벨/" + fn, fn)
+                _backup_labels(fl)
                 rows = json.load(open(fl, encoding="utf-8")) if fl.exists() else []
                 clip = body["clip"]
                 # t 는 초. 프레임 단위로 고른 것은 소수가 된다(30fps 면 0.03 초 간격).
@@ -398,6 +460,8 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(),
                             "application/json; charset=utf-8", 500)
+            finally:
+                _SAVE_LOCK.release()
             return
         self.send_error(404)
 
@@ -475,6 +539,33 @@ class H(BaseHTTPRequestHandler):
                 ct = "image/png" if ext == ".png" else "image/jpeg"
                 self._stream(ip, ct); return
             self.send_error(404); return
+        if p == "/api/queue":                    # 실험 러너 상태(결과탭 상단). 실행중=_exp/<name> 존재, 로그=runner.log 끝
+            q = {"running": sorted(d.name for d in (G / "_exp").glob("*") if d.is_dir()) if (G / "_exp").is_dir() else [],
+                 "log": []}
+            try:
+                q["log"] = (G / "logs/queue/runner.log").read_text(encoding="utf-8", errors="ignore").splitlines()[-25:]
+            except Exception:
+                pass
+            self._bytes(json.dumps(q, ensure_ascii=False).encode(), "application/json; charset=utf-8"); return
+        if p == "/api/clipstat":                 # 데이터확인 요약: 총수 + 표본(목록에 보이는 이미지) 라벨률·클래스 분포
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            got = raw_items((qs.get("src") or [""])[0], 600)
+            if got is None:
+                self.send_error(404, "category not found"); return
+            lab = 0; cls = {}; boxes = 0
+            for rel in got["images"]:
+                lp = raw_sibling_label(rel)
+                if lp is None or not lp.is_file():
+                    continue
+                lab += 1
+                for ln in lp.read_text(errors="ignore").splitlines():
+                    ps = ln.split()
+                    if len(ps) >= 5:
+                        cls[ps[0]] = cls.get(ps[0], 0) + 1; boxes += 1
+            note = RAW_CLASS_NOTE.get(got["cat"], "")
+            self._bytes(json.dumps({"cat": got["cat"], "img_total": got["img_total"], "vid_total": got["vid_total"],
+                                    "sample": len(got["images"]), "labeled": lab, "boxes": boxes, "classes": cls,
+                                    "note": note}, ensure_ascii=False).encode(), "application/json; charset=utf-8"); return
         if p == "/api/results":
             out = []
             rdir = G / "results"
@@ -495,6 +586,7 @@ class H(BaseHTTPRequestHandler):
                                  "tp": int(m.group(3)), "fn": int(m.group(4)), "fp": int(m.group(5))})
                 if not rows:
                     continue
+                _clips = {m.group(1): m.group(2) for m in re.finditer(r"^\s*클립 (\S+): (\S+)", txt, re.M)}   # score_kisa 클립별 판정
                 best = max(rows, key=lambda r: r["score"])
                 _stem = f.parent.name if f.name == "score.txt" else f.stem
                 _s = _stem.lower()
@@ -510,6 +602,7 @@ class H(BaseHTTPRequestHandler):
                     _item = "\ubc29\ud654"                       # 방화(기본)
                 out.append({"name": _stem, "score": best["score"], "rule": best["rule"],
                             "tp": best["tp"], "fn": best["fn"], "fp": best["fp"], "item": _item,
+                            "meta": {k: _meta.get(k) for k in ("model", "base", "extras", "extra", "status", "n_train")}, "clips": _clips,
                             "n": len(rows), "mtime": int(f.stat().st_mtime), "rules": rows})
             out.sort(key=lambda r: -r["score"])
             self._bytes(json.dumps(out).encode("utf-8"), "application/json; charset=utf-8"); return

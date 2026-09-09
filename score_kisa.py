@@ -91,9 +91,24 @@ def main():
         "결합+타일가정 3/5": dict(kind="combined", fire=0.4, smoke=0.6, window=5, hits=3),
     }
     print(f"\n=== {a.tag or a.model} (tiles={a.tiles}) ===")
+    best = None
     for name, rule in rules.items():
         res = f1([(gt, [onset(rows, rule)+DELAY] if onset(rows, rule) is not None else []) for rows, gt in per.values()])
         print(f"  {name:22s} → {res['score']:6.2f}  (정검 {res['tp']} 미검 {res['fn']} 오검 {res['fp']})")
+        if best is None or res["score"] > best[2]:
+            best = (name, rule, res["score"])
+    # 클립별 판정(최고 규칙) — 어떤 클립을 늘 놓치는지 보려고. 대시보드 결과탭 히트맵이 이 줄을 읽는다
+    if best:
+        bn, br, _ = best
+        print(f"\n=== 클립별 ({bn}) ===")
+        for stem, (rows, gt) in per.items():
+            o = onset(rows, br); sa = [o + DELAY] if o is not None else []
+            if gt is None:
+                v = f"오검{len(sa)}" if sa else "무GT"
+            else:
+                ok = any(gt - BEFORE <= x <= gt + AFTER for x in sa); extra = (len(sa) - 1) if ok else len(sa)
+                v = ("정검" if ok else "미검") + (f"+오검{extra}" if extra > 0 else "")
+            print(f"  클립 {stem}: {v} (gt={gt} sa={[round(x, 1) for x in sa]})")
 
 if __name__ == "__main__":
     main()
