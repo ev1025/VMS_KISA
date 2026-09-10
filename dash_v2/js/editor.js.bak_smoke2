@@ -312,7 +312,7 @@ function persistSam(clip) {                           // 참조샷·객체·구�
 const SAM_COLORS = ["#e8913a", "#58a6ff", "#d2a8ff", "#3fb950", "#f778ba", "#79c0ff", "#ffa657", "#56d364"];
 const FIRE_OBJ = { 1: ["불", "#f85149"], 2: ["연기", "#a371f7"] };        // 화재 클립: 객체 = 클래스(불·연기) 고정
 const samCol = o => LB.mode === "fire" ? (FIRE_OBJ[o] || FIRE_OBJ[2])[1] : SAM_COLORS[(o - 1) % SAM_COLORS.length];
-const samName = o => LB.mode === "fire" ? `객체 ${o} · ${(FIRE_OBJ[o] || FIRE_OBJ[2])[0]}` : `객체 ${o}`;   // 화재: 1=불 2=연기 를 번호와 함께 표시
+const samName = o => `객체 ${o}`;                                          // 화재도 숫자로(1=불, 2=연기 고정)
 const samCls = o => LB.mode === "fire" ? Math.max(0, Math.min(1, o - 1)) : 0;   // SAM 박스의 클래스
 const SRC_COLOR = { hand: "#58a6ff", sam: "#e8913a", gt: "#79c0ff", dino: "#3fb950", none: "#3fb950" };
 const SAMMAP = {}, DINOMAP = {};      // clip → 프레임맵(동기 조회용 캐시; 눈금·참조샷 줄에서 쓴다)
@@ -325,7 +325,7 @@ function renderEditor(f) {
   const top = el("div"); top.style.cssText = "width:100%;align-self:flex-start";   // #center 가 세로 가운데 정렬이라 위로 붙인다
   c.appendChild(top);
   const SM = samState(f.clip);                        // SAM 작업 상태
-  if (LB.mode === "fire") { SM.objs = [1, 2]; if (!FIRE_OBJ[SM.cur]) SM.cur = 1; }   // 화재: 불·연기 두 객체 고정
+  if (LB.mode === "fire") { SM.objs = [1]; SM.cur = 1; }   // 화재: SAM 객체는 불 하나(연기는 손라벨 박스만)
   if (!(SM.propFrames && SM.propFrames.length) && (SAMFR[f.stem] || []).length) SM.propFrames = SAMFR[f.stem].map(t => Number(t).toFixed(1));   // 저장소에 SAM 결과가 있으면 전파 토글 켜진 상태로 복원
   let SP = [], SMASK = null;                          // 현재 프레임·현재 객체의 점, 마스크
   if (!LB.src) LB.src = (f.saved && f.saved.length) ? "hand" : "none";
@@ -415,7 +415,7 @@ function renderEditor(f) {
       if (!r.ok) throw new Error(r.err || "실패");
       if (LB.mode === "person") { try { PLABELS = await (await fetch("/api/labels?kind=person")).json(); } catch (e) {} }
       else { try { LABELS = await (await fetch("/api/labels")).json(); } catch (e) {} }
-      SM.seeds = []; SM.objs = LB.mode === "fire" ? [1, 2] : [1]; SM.cur = 1; SM.handRef = false; SM.a = null; SM.b = null; SP = []; SMASK = null;
+      SM.seeds = []; SM.objs = [1]; SM.cur = 1; SM.handRef = false; SM.a = null; SM.b = null; SP = []; SMASK = null;
       _HIST[f.clip] = { undo: [], redo: [] };
       LB.boxes = []; LB.src = "none"; f.saved = null;
       styleHand(); drawObjs(); await refreshSam(); renderClipList(); if (typeof updateRawBadge === "function") updateRawBadge(f.stem);
@@ -577,7 +577,7 @@ function renderEditor(f) {
     b[1] = x1 / f.W; b[2] = y1 / f.H;
     b[3] = Math.max(x2 - x1, 6) / f.W; b[4] = Math.max(y2 - y1, 6) / f.H;   // 6px 아래로는 안 줄인다
   };
-  ov.oncontextmenu = ev => { ev.preventDefault(); if (LAB === "sam" && !_space && !rz && !mv) { const p = toImg(ev); samPoint(p.x / f.W, p.y / f.H, 0); } };   // SAM: 우클릭 = 제외점
+  ov.oncontextmenu = ev => { ev.preventDefault(); if (_resized) { _resized = false; return; } if (LAB === "sam" && !_space && !rz && !mv) { const p = toImg(ev); samPoint(p.x / f.W, p.y / f.H, 0); } };   // SAM: 우클릭 = 제외점
   let _resized = false;
   ov.onmousedown = ev => {
     ev.preventDefault(); _resized = false;
@@ -586,7 +586,7 @@ function renderEditor(f) {
     const h = ev.button === 2 || ev.shiftKey ? null : hitTest(p);   // 우클릭·Shift 는 언제나 새 박스
     if (h) { snap(); rz = h; sel = h.i; return; }
     if (ev.button !== 0) return;                      // 우클릭 = 제외점(oncontextmenu)
-    sd = { p, u: ev.shiftKey ? null : boxUnder(p) }; return;   // 누른 자리 기억. 끌면 박스(빈 곳=새 박스 · 박스 안=이동), 안 끌면 onclick 에서 점
+    sd = { p, u: ev.shiftKey ? null : boxUnder(p), cls: LB.mode === "fire" ? 1 : 0 }; return;   // 끌기 = 박스: 화재는 연기(손라벨만), 사람은 사람(참조샷). 불은 탭으로   // 누른 자리 기억. 끌면 박스(빈 곳=새 박스 · 박스 안=이동), 안 끌면 onclick 에서 점
     if (ev.button !== 2 && !ev.shiftKey) {
       const u = boxUnder(p);                        // 박스 안쪽을 잡았으면 위치 이동
       if (u !== null) {
@@ -610,7 +610,7 @@ function renderEditor(f) {
     if (sd) {                                        // 3px 넘게 끌면 드래그 시작(클릭=점 과 구분)
       if (Math.hypot(p.x - sd.p.x, p.y - sd.p.y) < 3) return;
       if (sd.u !== null) { const b = LB.boxes[sd.u]; snap(); mv = { i: sd.u, ox: sd.p.x - b[1] * f.W, oy: sd.p.y - b[2] * f.H }; sel = sd.u; }
-      else { curCls = LB.mode === "person" ? 0 : samCls(SM.cur); st = sd.p; }   // 화재: 현재 객체(1=불 2=연기)가 클래스
+      else { curCls = sd.cls; st = sd.p; }            // 끌기 = 연기(화재) / 사람
       sd = null; _resized = true;                     // 드래그 뒤의 click 은 점으로 안 찍는다
     }
     if (rz) { resizeTo(p); draw(); return; }
@@ -662,6 +662,7 @@ function renderEditor(f) {
   };
   const seedFromBox = i => {                       // 박스 크기 조절 → 그 박스를 쓰는 객체의 참조샷만 갱신(현재 객체와 무관)
     const b = LB.boxes[i]; if (!b) return;
+    if (LB.mode === "fire" && b[0] === 1) return;   // 연기는 참조샷으로 안 넣는다(손라벨로만)
     const box = [b[1], b[2], b[3], b[4]];
     const owner = seedForBox(i);
     if (owner) { owner.box = box; owner.i = i; if (owner.obj === SM.cur) SMASK = { box, poly: owner.poly || [] }; drawObjs(); }   // 윤곽선(poly)은 유지
@@ -732,7 +733,7 @@ function renderEditor(f) {
     persistSam(f.clip);
     rowObj.innerHTML = "";
     if (LAB !== "sam") return;
-    if (!SM.seeds.length) { bGo.disabled = !(SM.propFrames && SM.propFrames.length); if (LB.mode !== "fire") return; }   // 탭하기 전엔 객체 줄을 비워 둔다(화재는 1 불 · 2 연기 를 항상 보여 고르게)
+    if (!SM.seeds.length) { bGo.disabled = !(SM.propFrames && SM.propFrames.length); return; }   // 탭하기 전엔 객체 줄을 비워 둔다
     SM.objs.forEach(o => {
       const row = el("div"); row.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap";
       const tag = el("button", null, samName(o)); tag.style.cssText = `width:auto;height:auto;padding:2px 9px;font-size:11px;border-radius:6px;border:2px solid ${samCol(o)};color:${o === SM.cur ? "#06090f" : samCol(o)};background:${o === SM.cur ? samCol(o) : "transparent"};cursor:pointer`;
@@ -773,7 +774,7 @@ function renderEditor(f) {
       SM.handRef = false;
       SM.seeds = SM.seeds.filter(q => !q.fromHand);
       const used = new Set(SM.seeds.map(q => q.obj));
-      SM.objs = LB.mode === "fire" ? [1, 2] : SM.objs.filter(o => used.has(o) || o === 1);
+      SM.objs = LB.mode === "fire" ? [1] : SM.objs.filter(o => used.has(o) || o === 1);
       if (!SM.objs.length) SM.objs = [1];
       if (!SM.objs.includes(SM.cur)) SM.cur = SM.objs[0];
       styleHand(); loadSam(); fillShots(); return;
@@ -817,7 +818,7 @@ function renderEditor(f) {
       const iou = (a, b) => { const x1 = Math.max(a[1], b[1]), y1 = Math.max(a[2], b[2]), x2 = Math.min(a[1] + a[3], b[1] + b[3]), y2 = Math.min(a[2] + a[4], b[2] + b[4]); const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1); return inter / (a[3] * a[4] + b[3] * b[4] - inter || 1); };
       const taken = [], cand = [];
       boxes.forEach((b, i) => { if (taken.some(q => iou(q, b) > 0.7)) return; taken.push(b); cand.push({ b, i, cx: b[1] + b[3] / 2, cy: b[2] + b[4] / 2, hist: (hists[t] || [])[i] || null, obj: null }); });
-      if (LB.mode === "fire") cand.forEach(c => { c.obj = c.b[0] === 1 ? 2 : 1; });   // 화재: 클래스가 곧 객체
+      if (LB.mode === "fire") { for (let k = cand.length - 1; k >= 0; k--) { if (cand[k].b[0] === 1) cand.splice(k, 1); else cand[k].obj = 1; } }   // 화재: 불 박스만 객체 1 참조샷. 연기는 참조샷으로 안 넣는다
       else {
         const ks = Object.keys(last).map(Number);
         const cost = (c, k) => {                      // 위치(예측 위치와의 거리/허용거리) + 외형(1 - 색 유사도)
@@ -907,7 +908,7 @@ function renderEditor(f) {
     _watching = false;
     if (!seen) { if (ED && ED._tok === MY) drawObjs(); return; }   // 작업이 없었다 → 버튼 상태만 원래대로
     if (ED && ED._tok === MY) { rowObj.style.pointerEvents = ""; rowObj.style.opacity = ""; bHand.disabled = false; bHand.style.opacity = ""; bGo.disabled = false; bGo.textContent = "전파"; pstat.innerHTML = seen.err === "cancelled" ? '<span style="color:var(--mut)">취소됨</span>' : seen.err ? '<b style="color:#f85149">실패</b>' : ""; if (seen.err) setTimeout(() => { if (ED && ED._tok === MY) pstat.innerHTML = ""; }, 3000); }
-    if (!seen.err) { SM.seeds = []; SM.handRef = false; SM.objs = LB.mode === "fire" ? [1, 2] : [1]; SM.cur = 1; if (ED && ED._tok === MY) { SP = []; SMASK = null; styleHand(); drawObjs(); } }   // 참조샷은 전파에 쓰였으니 정리
+    if (!seen.err) { SM.seeds = []; SM.handRef = false; SM.objs = [1]; SM.cur = 1; if (ED && ED._tok === MY) { SP = []; SMASK = null; styleHand(); drawObjs(); } }   // 참조샷은 전파에 쓰였으니 정리
     await refreshSam();
   };
   bGo.onclick = async () => {
@@ -987,7 +988,7 @@ function renderEditor(f) {
     if (ev.key === "]") { ev.preventDefault(); SM.b = f.t; if (SM.a != null && SM.a > SM.b) SM.a = null; fillShots(); return; }
     if (LAB === "sam" && /^[1-8]$/.test(ev.key)) {
       const n = +ev.key;
-      if (LB.mode === "fire") { if (n <= 2) { SM.cur = n; loadSam(); } return; }   // 화재: 불(1)·연기(2) 만
+      if (LB.mode === "fire") return;                  // 화재: 객체는 불 하나
       if (!SM.objs.includes(n)) { SM.objs.push(n); SM.objs.sort((a, b) => a - b); } SM.cur = n; loadSam(); return;
     }
     if (ev.key === "Delete" || ev.key === "Backspace") {

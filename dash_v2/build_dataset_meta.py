@@ -13,7 +13,7 @@ G = Path("/NHNHOME/WORKSPACE/26mss002_E3/vms")
 
 # 보여줄 데이터셋: 원본·대표만 (파생 실험셋 fire_v2/v3/v4, kfold 등은 제외)
 DATASETS = [
-    ("dataset_24k", "24k 방화 (AI허브 71751)", "data/학습데이터/dataset_24k", ["fire", "smoke"]),
+    ("aihub71751_24k", "24k 방화 (AI허브 71751)", "data/학습데이터/aihub71751_24k", ["fire", "smoke"]),
     ("fasdd_yolo", "FASDD (오픈, 영어)", "data/학습데이터/fasdd_yolo", ["fire", "smoke"]),
     # 설경·설경안개는 같은 성격(FASDD 눈/안개 장면)이라 한 세트로 합쳐 보여준다
     ("fasdd_snowfog", "설경·안개 (FASDD)",
@@ -34,6 +34,8 @@ def scan(rels):
     found, total = [], 0
     for rel in rels:
         di = G / rel / "images" / "train"
+        if not di.is_dir():
+            di = G / rel / "images"                     # train 하위 폴더 없이 images/ 에 바로 있는 세트
         if not di.is_dir():
             continue
         names = sorted(os.listdir(di))
@@ -56,7 +58,7 @@ def scan(rels):
     out = []
     for rel, n in merged:
         stem = Path(n).stem
-        has_label = (G / rel / "labels" / "train" / (stem + ".txt")).exists()
+        has_label = (G / rel / "labels" / "train" / (stem + ".txt")).exists() or (G / rel / "labels" / (stem + ".txt")).exists()
         out.append({"file": n, "stem": stem, "labeled": has_label, "rel": rel})
     return out, total
 

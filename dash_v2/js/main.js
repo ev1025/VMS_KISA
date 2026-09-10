@@ -117,11 +117,56 @@ async function buildResults() {
 }
 
 
+// 전파 작업 전역 표시(헤더). 서버 큐를 2초마다 조회
+let _JOBS_T = null;
+async function pollJobs() {
+  const box = $("#jobStat"); if (!box) return;
+  let jobs = [];
+  try { jobs = await (await fetch("/api/sam2_jobs")).json(); } catch (e) { jobs = []; }
+  const run = jobs.filter(j => j.state === "running"), q = jobs.filter(j => j.state === "queued");
+  try {                                                // 지금 열린 편집기 클립에 작업이 있으면 편집기도 진행률을 보이게(다른 곳에서 시작된 작업 포함)
+    if (typeof ED !== "undefined" && ED && ED.watch && [...run, ...q].some(j => j.clip === ED.clip.split("/").pop())) ED.watch();
+  } catch (e) {}
+  if (!run.length && !q.length) { box.hidden = true; box.innerHTML = ""; return; }
+  const spin = '<span style="display:inline-block;width:11px;height:11px;border:2px solid #58a6ff55;border-top-color:#58a6ff;border-radius:50%;animation:ed_sp .8s linear infinite"></span>';
+  if (!document.getElementById("ed_sp")) { const st = document.createElement("style"); st.id = "ed_sp"; st.textContent = "@keyframes ed_sp{to{transform:rotate(360deg)}}"; document.head.appendChild(st); }
+  const parts = run.map(j => `<b>${j.clip}</b> ${j.total ? Math.min(99, Math.round(j.done / j.total * 100)) : 0}%`);
+  if (q.length) parts.push(`<span style="color:var(--mut)">대기 ${q.length}</span>`);
+  box.innerHTML = spin + `<span>전파 ${parts.join(" · ")}</span>`;
+  box.hidden = false;
+  box.onclick = () => {                              // 진행 중 클립으로 이동(원본 데이터 목록에 있을 때)
+    const j = run[0] || q[0]; if (!j) return;
+    const it = [...document.querySelectorAll("#list .item")].find(e => (e.dataset.rel || "").split("/").pop().replace(/\.mp4$/, "") === j.clip);
+    if (it) it.click();
+  };
+}
+function startJobPoll() { if (_JOBS_T) return; pollJobs(); _JOBS_T = setInterval(pollJobs, 2000); }
 async function boot() {
+  startJobPoll();
   META = await (await fetch("/api/meta")).json();
   try { LABELS = await (await fetch("/api/labels")).json(); } catch (e) { LABELS = null; }
-  try { PLABELS = await (await fetch("/api/labels?kind=person")).json(); } catch (e) { PLABELS = null; }   // person 라벨도 미리 로드(리스트 뱃지용)
+  try { PLABELS = await (await fetch("/api/labels?kind=person")).json(); } catch (e) { PLABELS = null; }
+  try { SAMFR = await (await fetch("/api/sam2frames")).json(); } catch (e) { SAMFR = {}; }   // SAM 전파 프레임(목록 배지 합산용)   // person 라벨도 미리 로드(리스트 뱃지용)
   for (const [k, v] of Object.entries(META.items)) v.rows.forEach(row => row.item = k);
+  const last = (typeof loadSession === "function") ? loadSession() : {};
+  if (last.mode === "data" || last.mode === "review" || last.mode === "results") CUR.mode = last.mode;
+  if (last.dsKind) DS_KIND = last.dsKind;          // 카테고리는 buildDatasetSrc 가 DS_SEL 을 그대로 쓴다
+  if (last.dsSel) DS_SEL = last.dsSel;
   buildMode(); applyMode();   // 시작 모드에 맞는 좌측/중앙 패널을 그린다(데이터 확인=데이터셋 패널)
+  restoreLast(last);
+}
+
+// 새로고침 전에 보던 영상·프레임으로 되돌린다. 목록이 그려질 때까지만 기다리고, 없으면 조용히 포기.
+async function restoreLast(last) {
+  if (!last || CUR.mode !== "data" || !last.rel) return;
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 150));
+    if (document.querySelector("#list .item")) break;
+  }
+  try {
+    DS_EDIT = true;
+    await showRawVideo(last.rel);                         // 편집기 열기
+    if (last.sec != null && LB.clip) await openFrameAt(LB.clip, last.sec, last.lmode || "person");
+  } catch (e) {}
 }
 boot();

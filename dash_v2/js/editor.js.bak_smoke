@@ -312,7 +312,7 @@ function persistSam(clip) {                           // 참조샷·객체·구�
 const SAM_COLORS = ["#e8913a", "#58a6ff", "#d2a8ff", "#3fb950", "#f778ba", "#79c0ff", "#ffa657", "#56d364"];
 const FIRE_OBJ = { 1: ["불", "#f85149"], 2: ["연기", "#a371f7"] };        // 화재 클립: 객체 = 클래스(불·연기) 고정
 const samCol = o => LB.mode === "fire" ? (FIRE_OBJ[o] || FIRE_OBJ[2])[1] : SAM_COLORS[(o - 1) % SAM_COLORS.length];
-const samName = o => LB.mode === "fire" ? `객체 ${o} · ${(FIRE_OBJ[o] || FIRE_OBJ[2])[0]}` : `객체 ${o}`;   // 화재: 1=불 2=연기 를 번호와 함께 표시
+const samName = o => `객체 ${o}`;                                          // 화재도 숫자로(1=불, 2=연기 고정)
 const samCls = o => LB.mode === "fire" ? Math.max(0, Math.min(1, o - 1)) : 0;   // SAM 박스의 클래스
 const SRC_COLOR = { hand: "#58a6ff", sam: "#e8913a", gt: "#79c0ff", dino: "#3fb950", none: "#3fb950" };
 const SAMMAP = {}, DINOMAP = {};      // clip → 프레임맵(동기 조회용 캐시; 눈금·참조샷 줄에서 쓴다)
@@ -732,7 +732,7 @@ function renderEditor(f) {
     persistSam(f.clip);
     rowObj.innerHTML = "";
     if (LAB !== "sam") return;
-    if (!SM.seeds.length) { bGo.disabled = !(SM.propFrames && SM.propFrames.length); if (LB.mode !== "fire") return; }   // 탭하기 전엔 객체 줄을 비워 둔다(화재는 1 불 · 2 연기 를 항상 보여 고르게)
+    if (!SM.seeds.length) { bGo.disabled = !(SM.propFrames && SM.propFrames.length); return; }   // 탭하기 전엔 객체 줄을 비워 둔다
     SM.objs.forEach(o => {
       const row = el("div"); row.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap";
       const tag = el("button", null, samName(o)); tag.style.cssText = `width:auto;height:auto;padding:2px 9px;font-size:11px;border-radius:6px;border:2px solid ${samCol(o)};color:${o === SM.cur ? "#06090f" : samCol(o)};background:${o === SM.cur ? samCol(o) : "transparent"};cursor:pointer`;

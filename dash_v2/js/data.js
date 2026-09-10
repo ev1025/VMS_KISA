@@ -1,6 +1,8 @@
 // dash_v2/js/data.js — 데이터 확인 탭(원본/학습 데이터 브라우징·이미지·영상). app.js 에서 분리(2026-09-09). 로드 순서: core → review → data → editor → main (dashboard.html)
 // ---------- 데이터 확인 탭 ----------
 let DSMETA = null, DS_CUR = null, DS_ONLY_LABELED = false, DS_SEL = null, DS_KIND = "raw", DS_EDIT = false;   // raw=원본, ds=학습
+const DS_SEL_BY = { raw: null, ds: null };   // 원본/학습 각각 마지막에 고른 항목
+const CONDS_BY = {};                          // 카테고리 → 촬영조건(한 번 받으면 재사용)
 async function buildDatasetSrc() {
   if (!DSMETA) DSMETA = await (await fetch("/api/dataset")).json();
   if (!SOURCES) { try { SOURCES = await (await fetch("/api/sources")).json(); } catch (e) { SOURCES = []; } }
@@ -18,7 +20,7 @@ async function buildDatasetSrc() {
     b.style.cssText = "flex:1;border-radius:6px;padding:5px;cursor:pointer;font-size:11px;font-weight:700;" +
       (on ? "background:var(--blue);color:#06090f;border:1px solid var(--blue)"
           : "background:var(--panel);color:var(--mut);border:1px solid var(--line)");
-    b.onclick = () => { if (DS_KIND === k) return; DS_KIND = k; DS_SEL = null; buildDatasetSrc(); };
+    b.onclick = () => { if (DS_KIND === k) return; DS_SEL_BY[DS_KIND] = DS_SEL; DS_KIND = k; DS_SEL = DS_SEL_BY[k]; buildDatasetSrc(); };
     kb.appendChild(b);
   });
   const cb = el("button", null, "\u21bb"); cb.title = "서버 폴더 캐시 새로고침(데이터 폴더를 옮기거나 이름 바꾼 뒤)";
@@ -42,8 +44,8 @@ async function buildDatasetSrc() {
   }
   if (!DS_SEL || ![...sel.options].some(o => o.value === DS_SEL)) DS_SEL = (sel.options[0] || {}).value;
   if (!DS_SEL) { $("#list").innerHTML = '<div class="empty">보여줄 데이터가 없습니다</div>'; return; }
-  sel.value = DS_SEL;
-  sel.onchange = () => pickDataSrc(sel.value);
+  sel.value = DS_SEL; DS_SEL_BY[DS_KIND] = DS_SEL;
+  sel.onchange = () => { DS_SEL_BY[DS_KIND] = sel.value; pickDataSrc(sel.value); };
   pickDataSrc(DS_SEL);
 }
 
@@ -62,22 +64,33 @@ async function renderRawList(cat) {
   let r;
   try { r = await (await fetch("/api/raw?src=" + encodeURIComponent(cat))).json(); }
   catch (e) { box.innerHTML = '<div class="empty">이 카테고리를 못 읽었습니다</div>'; return; }
-  const shownImg = r.img_total > r.images.length ? ` (표시 ${r.images.length})` : "";
   box.innerHTML = "";
-  // 요약 패널: 총수·표본 라벨률·클래스 분포·규약 경고 (/api/clipstat 는 목록 표본만 읽어 빠르다)
-  const sum = el("div"); sum.style.cssText = "margin:0 0 6px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:11px;line-height:1.6;color:var(--mut)";
-  sum.innerHTML = `이미지 <b style="color:var(--tx)">${r.img_total.toLocaleString()}</b> · 영상 <b style="color:var(--tx)">${r.vid_total}</b>${shownImg}`;
-  box.appendChild(sum);
-  fetch("/api/clipstat?src=" + encodeURIComponent(cat)).then(x => x.json()).then(st => {
-    const cls = Object.entries(st.classes || {}).sort().map(([k, v]) => `${k}:${v}`).join(" ");
-    sum.innerHTML += `<br>표본 ${st.sample}장 중 라벨 <b style="color:var(--tx)">${st.labeled}</b> · 박스 ${st.boxes}` + (cls ? ` · 클래스 <span style="font-family:ui-monospace,Menlo,monospace">${cls}</span>` : "") +
-      (st.note ? `<br><span style="color:#d29922;font-weight:700">⚠ ${st.note}</span>` : "");
-  }).catch(() => {});
-  // 검색 필터(파일명 부분일치, 클라이언트)
-  const fi = el("input"); fi.type = "search"; fi.placeholder = "파일명 검색…";
-  fi.style.cssText = "width:100%;box-sizing:border-box;margin:0 0 6px;padding:5px 8px;border-radius:6px;background:var(--panel);color:var(--tx);border:1px solid var(--line);font-size:11px";
-  fi.oninput = () => { const k = fi.value.trim().toLowerCase(); box.querySelectorAll(".item").forEach(it => { const nm = it.querySelector(".nm"); it.hidden = !!k && !((nm && (nm.title || nm.textContent) || "").toLowerCase().includes(k)); }); };
-  box.appendChild(fi);
+  // 촬영조건 필터(야간·눈·비·안개). 조건 XML 이 있는 카테고리에서만 뜬다.
+  if (r.videos.length) {
+    const cf = el("div"); cf.id = "condFilterRow";
+    box.appendChild(cf);
+    let cd = CONDS_BY[cat];                       // 조건을 먼저 받아 목록과 같이 그린다(늦게 따로 뜨지 않게)
+    if (!cd) { try { cd = await (await fetch("/api/clipconds?src=" + encodeURIComponent(cat))).json(); } catch (e) { cd = {}; } CONDS_BY[cat] = cd || {}; }
+    {
+      CONDS = cd || {}; CLIPFILTER = "";
+      const draw = () => {
+        cf.innerHTML = ""; cf.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;position:sticky;top:-6px;z-index:2;background:var(--bg,#0d1117);margin:-6px -6px 6px;padding:8px 6px 6px;border-bottom:1px solid var(--line)";   // 목록 스크롤 상단에 고정
+        const cnt = key => { const k0 = CLIPFILTER; CLIPFILTER = key; const n = r.videos.filter(v => passFilter(v.split("/").pop().replace(/\.mp4$/, ""))).length; CLIPFILTER = k0; return n; };
+        [["", "전체"], ["night", "야간"], ["day", "주간"], ["snow", "눈"], ["rain", "비"], ["fog", "안개"], ["hard", "야간·악천후"]]
+          .forEach(([key, label]) => {
+            const n = cnt(key);
+            if (key && !n) return;
+            const b = el("button", null, `${label} ${n}`);
+            const on = CLIPFILTER === key;
+            b.style.cssText = "flex:0 0 auto;width:auto;padding:2px 8px;font-size:11px;font-weight:700;border-radius:6px;cursor:pointer;" +
+              (on ? "background:#58a6ff22;color:#cfe4ff;border:1px solid #58a6ff55" : "background:var(--panel);color:var(--mut);border:1px solid var(--line)");
+            b.onclick = () => { CLIPFILTER = key; draw(); applyCondFilter(box); };
+            cf.appendChild(b);
+          });
+      };
+      draw();
+    }
+  }
   if (!r.images.length && !r.videos.length) {
     box.innerHTML = '<div class="empty">이 폴더엔 이미지·영상이 없습니다<br><small>압축 상태이거나 라벨 파일만 있는 폴더</small></div>';
     return;
@@ -94,7 +107,7 @@ async function renderRawList(cat) {
   }
   if (r.videos.length) {
     r.videos.forEach(rel => {
-      const it = el("div", "item");
+      const it = el("div", "item"); it.dataset.rel = rel;
       const _vn = labeledCount(rel.split("/").pop().replace(/\.mp4$/, ""));   // 손라벨 있으면 개수 뱃지
       if (_vn) { const _vb = el("span", null, String(_vn)); _vb.style.cssText = "flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:18px;padding:0 6px;border-radius:6px;font:700 11px/1 ui-monospace,Menlo,monospace;color:#cfe4ff;background:#58a6ff22;border:1px solid #58a6ff55;margin-right:6px"; it.appendChild(_vb); }
       const nm = el("span", "nm", rel.split("/").pop()); nm.title = rel; nm.style.userSelect = "text"; nm.style.cursor = "text";
@@ -102,8 +115,22 @@ async function renderRawList(cat) {
       it.onclick = () => { if (window.getSelection && String(window.getSelection())) return; openClip(rel); };
       box.appendChild(it);
     });
-    if (!r.images.length) openClip(r.videos[0]);
+    applyCondFilter(box);
+    if (!r.images.length) {
+      let last = null; try { last = (loadSession() || {}).rel; } catch (e) {}
+      openClip(last && r.videos.includes(last) ? last : r.videos[0]);   // 마지막에 보던 영상이 이 목록에 있으면 그걸로
+    }
   }
+}
+
+// 조건 필터를 목록 항목에 적용한다(검색 필터와 겹치지 않게 hidden 만 건드린다).
+function applyCondFilter(box) {
+  box.querySelectorAll(".item").forEach(it => {
+    const nm = it.querySelector(".nm");
+    const rel = (nm && (nm.title || nm.textContent)) || "";
+    if (!/\.mp4$/i.test(rel)) return;                 // 이미지 항목은 조건이 없다
+    it.hidden = !passFilter(rel.split("/").pop().replace(/\.mp4$/, ""));
+  });
 }
 
 // 원본 이미지 한 장. 같은 이름 YOLO txt 가 있으면 박스도 그린다.
@@ -153,7 +180,7 @@ function catMode(rel) {
   const cat = (rel || "").split("/")[2] || "";
   if (/검증|채점|배포/.test(cat)) return "none";
   if (/방화|산불/.test(cat)) return "fire";
-  if (/사람|침입|쓰러짐|배회|스토킹/.test(cat)) return "person";
+  if (/사람|침입|쓰러짐|배회|스토킹|이상행동|다각도/.test(cat)) return "person";
   return "none";
 }
 // 라벨편집 진입: 에디터 열고 우측을 '영상 보기' 버튼으로
@@ -171,21 +198,36 @@ function openEditorFor(rel) {
   const KVs = (k, val) => { const d = el("div"); d.style.cssText = "padding:6px 0;border-bottom:1px solid var(--line)"; const t = el("div", "", k); t.style.cssText = "color:var(--mut);font-size:11px;margin-bottom:2px"; const vv = el("div", "", val); vv.style.cssText = "font-family:ui-monospace,Menlo,monospace;font-size:11px;word-break:break-all;line-height:1.45"; d.appendChild(t); d.appendChild(vv); return d; };
   r.appendChild(KVs("파일", rel.split("/").pop()));
 }
+// 목록 배지(학습데이터 프레임 수) 한 항목만 다시 그린다 — 전파·삭제 직후
+function updateRawBadge(stem) {
+  document.querySelectorAll("#list .item").forEach(it => {
+    if (!it.dataset.rel || it.dataset.rel.split("/").pop().replace(/\.mp4$/, "") !== stem) return;
+    const old = it.querySelector(":scope > span:not(.nm)"); if (old) old.remove();
+    const n = labeledCount(stem);
+    if (n) { const b = el("span", null, String(n)); b.style.cssText = "flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:18px;padding:0 6px;border-radius:6px;font:700 11px/1 ui-monospace,Menlo,monospace;color:#cfe4ff;background:#58a6ff22;border:1px solid #58a6ff55;margin-right:6px"; it.insertBefore(b, it.firstChild); }
+  });
+}
 // 좌측 영상 클릭: 편집 중이면 그 영상 편집 유지, 아니면 재생
 function openClip(rel) {
+  saveSession({ dsKind: DS_KIND, dsSel: DS_SEL, rel: rel });   // 새로고침 복원용
   showRawVideo(rel);   // showRawVideo 가 DS_EDIT 를 보고 에디터/영상 결정
 }
 // 원본 영상 한 편. XML 정답(이벤트 시각)이 있으면 같이 보여준다.
+let _SRV_SEQ = 0;   // 늦게 끝난 이전 호출이 우측 정보를 덮지 않게(새로고침 복원 때 첫 항목과 경쟁)
 async function showRawVideo(rel) {
+  const _my = ++_SRV_SEQ;
+  try { saveSession({ dsKind: DS_KIND, dsSel: DS_SEL, rel: rel }); } catch (e) {}   // 새로고침 복원용
   const clip = rel.replace(/^data\/원본데이터\//, "").replace(/\.mp4$/, "");
   let events = [], dur = 0, ci = null;
   try { ci = await (await fetch("/api/clipinfo?clip=" + encodeURIComponent(clip))).json(); dur = ci.dur || 0; events = ci.fire || []; } catch (e) {}
+  if (_my !== _SRV_SEQ) return;
+  document.querySelectorAll("#list .item").forEach(e => { const on = e.dataset.rel === rel; e.classList.toggle("on", on); if (on) e.scrollIntoView({ block: "nearest" }); });   // 지금 보는 영상 표시
   const first = events[0] || {};
   document.onkeydown = null;
   const _mode0 = catMode(rel);
   const _editing = DS_EDIT && _mode0 !== "none";
   if (_editing) {
-    openFrameAt(clip, first.start != null ? first.start : null, _mode0);   // 편집 중 = 중앙은 에디터
+    openFrameAt(clip, null, _mode0);   // 시작 프레임은 openFrameAt 이 고른다(자동라벨 첫 검출 → 정답 시각 → 0)
   } else {
     ED = null;   // 영상 볼 땐 에디터 재사용상태 초기화(다음 라벨편집이 새로 그리게)
     renderCenter({ video: rel, name: rel.split("/").pop(), signal_type: "raw", signal: [], zone: [], tracks: null,
