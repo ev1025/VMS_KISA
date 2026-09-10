@@ -1,6 +1,7 @@
 // dash_v2/js/data.js — 데이터 확인 탭(원본/학습 데이터 브라우징·이미지·영상). app.js 에서 분리(2026-09-09). 로드 순서: core → review → data → editor → main (dashboard.html)
 // ---------- 데이터 확인 탭 ----------
 let DSMETA = null, DS_CUR = null, DS_ONLY_LABELED = false, DS_SEL = null, DS_KIND = "raw", DS_EDIT = false;   // raw=원본, ds=학습
+let SOURCES = null;                           // 원본 카테고리 목록(/api/sources). 한 번 받아 재사용
 const DS_SEL_BY = { raw: null, ds: null };   // 원본/학습 각각 마지막에 고른 항목
 const CONDS_BY = {};                          // 카테고리 → 촬영조건(한 번 받으면 재사용)
 async function buildDatasetSrc() {
@@ -175,29 +176,19 @@ async function showRawImage(rel) {
   r.appendChild(KV("라벨(기존 GT)", boxes.length ? boxes.length + "박스" : "없음"));
 }
 
-// 카테고리로 편집 모드 판정: fire / person / none
+// 카테고리로 편집 모드 판정: fire / person / none. 이름으로 못 정하는 카테고리는 사용자가 고른 값(setCatMode)을 쓴다.
+// 검증·채점·배포 영상은 채점 전용이라 어떤 경우에도 편집하지 않는다(학습 누수).
+function catOf(rel) { return (rel || "").split("/")[2] || ""; }
+function isScoringCat(cat) { return /검증|채점|배포/.test(cat); }
 function catMode(rel) {
-  const cat = (rel || "").split("/")[2] || "";
-  if (/검증|채점|배포/.test(cat)) return "none";
-  if (/방화|산불/.test(cat)) return "fire";
-  if (/사람|침입|쓰러짐|배회|스토킹|이상행동|다각도/.test(cat)) return "person";
+  const cat = catOf(rel);
+  if (isScoringCat(cat)) return "none";
+  if (/방화|산불|화재|fire|smoke/i.test(cat)) return "fire";
+  if (/사람|침입|쓰러짐|배회|스토킹|이상행동|다각도|person|human/i.test(cat)) return "person";
+  try { const v = localStorage.getItem("kisa_catmode:" + cat); if (v === "fire" || v === "person") return v; } catch (e) {}
   return "none";
 }
-// 라벨편집 진입: 에디터 열고 우측을 '영상 보기' 버튼으로
-function openEditorFor(rel) {
-  const clip = rel.replace("data/원본데이터/", "").replace(".mp4", "");
-  const mode = catMode(rel);
-  DS_EDIT = true;
-  openFrameAt(clip, null, mode);
-  const r = $("#right"); r.innerHTML = "";
-  r.appendChild(el("div", "rtitle", mode === "person" ? "사람 라벨 편집" : "라벨 편집"));
-  const vb = el("button", null, "\u25B6 영상 보기");
-  vb.style.cssText = "width:100%;margin-bottom:10px;padding:8px;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px;background:var(--panel2);color:var(--tx);border:1px solid var(--blue)";
-  vb.onclick = () => { DS_EDIT = false; showRawVideo(rel); };
-  r.appendChild(vb);
-  const KVs = (k, val) => { const d = el("div"); d.style.cssText = "padding:6px 0;border-bottom:1px solid var(--line)"; const t = el("div", "", k); t.style.cssText = "color:var(--mut);font-size:11px;margin-bottom:2px"; const vv = el("div", "", val); vv.style.cssText = "font-family:ui-monospace,Menlo,monospace;font-size:11px;word-break:break-all;line-height:1.45"; d.appendChild(t); d.appendChild(vv); return d; };
-  r.appendChild(KVs("파일", rel.split("/").pop()));
-}
+function setCatMode(cat, mode) { try { localStorage.setItem("kisa_catmode:" + cat, mode); } catch (e) {} }
 // 목록 배지(학습데이터 프레임 수) 한 항목만 다시 그린다 — 전파·삭제 직후
 function updateRawBadge(stem) {
   document.querySelectorAll("#list .item").forEach(it => {
@@ -227,7 +218,8 @@ async function showRawVideo(rel) {
   const _mode0 = catMode(rel);
   const _editing = DS_EDIT && _mode0 !== "none";
   if (_editing) {
-    openFrameAt(clip, null, _mode0);   // 시작 프레임은 openFrameAt 이 고른다(자동라벨 첫 검출 → 정답 시각 → 0)
+    await openFrameAt(clip, null, _mode0);   // 시작 프레임은 openFrameAt 이 고른다(자동라벨 첫 검출 → 정답 시각 → 0). 기다려야 새로고침 복원이 두 번 열지 않는다
+    if (_my !== _SRV_SEQ) return;
   } else {
     ED = null;   // 영상 볼 땐 에디터 재사용상태 초기화(다음 라벨편집이 새로 그리게)
     renderCenter({ video: rel, name: rel.split("/").pop(), signal_type: "raw", signal: [], zone: [], tracks: null,
@@ -251,16 +243,20 @@ async function showRawVideo(rel) {
     events.forEach((fs, i) => r.appendChild(KV(events.length > 1 ? `정답 ${i + 1}` : "정답", `${fmt(fs.start)} · ${fs.dur}초간`)));
     if (!events.length) r.appendChild(KV("정답", "XML 없음"));
   } else r.appendChild(KV("정답", "정보 없음"));
-  // 라벨 대상 클립이면 버튼: 편집중=영상보기 / 아니면 라벨편집 (영상정보는 그대로)
+  // 라벨 대상 클립이면 버튼: 편집중=영상보기 / 아니면 라벨편집 (영상정보는 그대로). 정답이 있든 없든 편집할 수 있다(정답 원본은 읽기만).
   const _stem = stemOf(clip);
+  const _btn = (txt, primary) => { const b = el("button", null, txt); b.style.cssText = "width:100%;margin-top:10px;padding:8px;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px;" + (primary ? "background:var(--blue);color:#06090f;border:1px solid var(--blue)" : "background:var(--panel2);color:var(--tx);border:1px solid var(--blue)"); return b; };
   if (_mode0 !== "none") {
-    { const _n = labeledCount(_stem); r.appendChild(KV("손라벨", _n ? _n + "프레임" : "없음")); }   // fire·person 둘 다
-    const _eb = el("button", null, _editing ? "\u25B6 영상 보기" : "라벨 편집");
-    _eb.style.cssText = "width:100%;margin-top:10px;padding:8px;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px;" +
-      (_editing ? "background:var(--panel2);color:var(--tx);border:1px solid var(--blue)" : "background:var(--blue);color:#06090f;border:1px solid var(--blue)");
+    { const _n = labeledCount(_stem); r.appendChild(KV("학습 라벨", _n ? _n + "프레임" : "없음")); }   // 손라벨 ∪ SAM
+    const _eb = _btn(_editing ? "▶ 영상 보기" : "라벨 편집", !_editing);
     _eb.onclick = () => { DS_EDIT = !_editing; showRawVideo(rel); };
     r.appendChild(_eb);
-  }
+  } else if (!isScoringCat(catOf(rel))) {                 // 이름으로 모드를 못 정한 카테고리: 무엇을 라벨할지 골라서 연다(카테고리에 기억)
+    const _cat = catOf(rel);
+    [["person", "사람 라벨 편집"], ["fire", "불·연기 라벨 편집"]].forEach(([m, txt]) => {
+      const b = _btn(txt, m === "person"); b.onclick = () => { setCatMode(_cat, m); DS_EDIT = true; showRawVideo(rel); }; r.appendChild(b);
+    });
+  } else r.appendChild(KV("편집", "채점 전용 영상 · 라벨 안 함"));
 }
 function renderDatasetList() {
   const box = $("#list"); box.innerHTML = "";

@@ -10,17 +10,14 @@ function buildMode() {
 }
 function applyMode() {
   document.onkeydown = null;   // 편집기 밖에선 단축키 끄기
-  $("#right").hidden = (CUR.mode === "label" || CUR.mode === "results");   // 라벨 생성·결과는 우측 없이
+  $("#right").hidden = (CUR.mode === "results");   // 결과 탭은 우측 없이
   $(".srcbox").hidden = (CUR.mode === "results");   // 결과 탭은 소스 드롭다운 숨김
   const kindBox = $("#dsKind"); if (kindBox) kindBox.style.display = (CUR.mode === "data") ? "flex" : "none";   // 원본/학습 버튼은 데이터 확인에서만
-  const emptyMsg = { data: "데이터셋과 이미지를 선택하세요", review: "영상을 선택하세요", label: "프레임을 선택하세요" }[CUR.mode];
+  const emptyMsg = { data: "데이터셋과 이미지를 선택하세요", review: "영상을 선택하세요" }[CUR.mode];
   $("#center").innerHTML = '<div class="empty">' + emptyMsg + '</div>';
   $("#right").innerHTML = '<div class="empty">—</div>';
   if (CUR.mode === "data") {
     buildDatasetSrc();
-  } else if (CUR.mode === "label") {
-    buildLabelSrc();
-    labelEmptyCenter();
   } else if (CUR.mode === "results") {
     $("#list").innerHTML = ""; buildResults();
   } else {
@@ -146,7 +143,8 @@ async function boot() {
   META = await (await fetch("/api/meta")).json();
   try { LABELS = await (await fetch("/api/labels")).json(); } catch (e) { LABELS = null; }
   try { PLABELS = await (await fetch("/api/labels?kind=person")).json(); } catch (e) { PLABELS = null; }
-  try { SAMFR = await (await fetch("/api/sam2frames")).json(); } catch (e) { SAMFR = {}; }   // SAM 전파 프레임(목록 배지 합산용)   // person 라벨도 미리 로드(리스트 뱃지용)
+  try { SAMFR = await (await fetch("/api/sam2frames")).json(); } catch (e) { SAMFR = {}; }   // SAM 전파 프레임(목록 배지 합산용)
+  try { const cf = await (await fetch("/api/config")).json(); window.PROP_DEFAULT = cf.prop_default; } catch (e) {}   // 서버가 정한 기본 전파 방식
   for (const [k, v] of Object.entries(META.items)) v.rows.forEach(row => row.item = k);
   const last = (typeof loadSession === "function") ? loadSession() : {};
   if (last.mode === "data" || last.mode === "review" || last.mode === "results") CUR.mode = last.mode;
@@ -165,8 +163,9 @@ async function restoreLast(last) {
   }
   try {
     DS_EDIT = true;
-    await showRawVideo(last.rel);                         // 편집기 열기
-    if (last.sec != null && LB.clip) await openFrameAt(LB.clip, last.sec, last.lmode || "person");
+    await showRawVideo(last.rel);                         // 편집기 열기(시작 프레임까지 열고 돌아온다)
+    const mode = last.lmode || catMode(last.rel);        // 모드는 저장값, 없으면 카테고리로(방화 클립이 사람 모드로 열리지 않게)
+    if (last.sec != null && LB.clip && mode !== "none") await openFrameAt(LB.clip, last.sec, mode);
   } catch (e) {}
 }
 boot();

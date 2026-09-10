@@ -1,20 +1,15 @@
 # -*- coding: utf-8 -*-
-"""통합 KISA 검수 대시보드 서버 (서버에서 실행, ssh -L 로 로컬 브라우저 접속).
+"""KISA 검수 대시보드 서버(서버에서 실행, ssh -L 8890 으로 로컬 브라우저 접속).
 
-한 서버에서 네 가지를 다 제공한다.
-  - /              : 대시보드 HTML
-  - /api/meta      : 4항목 영상별 GT·신호·맵·트랙 (dash_meta.json)
-  - /vid/<경로>    : 배포 영상 스트리밍 (Range 지원, 브라우저 seek)
-  - /frame/<파일>  : 기존 손라벨 프레임 PNG (labelfull)
-  - /newframe/<파일>: 새 손라벨 대상 하드 프레임 PNG (labelfull_new)
-  - /api/newframes : 하드 프레임 목록 (labelfull_new/meta.json)
-  - /api/savelabel : (POST) 손라벨 박스를 fire_labels.json 에 저장
-  - /api/clipinfo  : 클립 원본 mp4 의 fps·프레임수·해상도 (임의 프레임 고르기용)
-  - /api/sources   : 원본데이터 카테고리 목록(폴더별 영상 수)
-  - /api/raw       : 한 카테고리 안의 이미지·영상 목록 (데이터 확인용)
-  - /api/clips     : 한 카테고리의 영상 목록 (원본데이터 기준 상대경로, 확장자 없음)
-                     (clipinfo 는 같은 이름 XML 의 화재 발생 시각도 함께 준다)
-  - /frameat       : 클립의 그 초(t) 프레임 한 장을 JPEG 로 (라벨 생성에서 프레임 선택)
+라벨 저장소 셋(표시·학습 우선순위 순):
+  손라벨   data/학습데이터/손라벨/{person,fire}_labels.json   /api/savelabel · /api/labels · /api/clearlabels
+  SAM 전파 data/학습데이터/자동라벨/sam2/<stem>.json         /api/sam2_propagate_start(큐) · sam2_jobs · sam2_cancel · sam2_label · sam2_drop · sam2_clear · sam2frames
+  DINO     data/학습데이터/자동라벨/dino/<stem>.json         /api/autolabel · autolabel_drop (배치 스크립트가 만든다. 첫 등장 프레임 찾기·초안용)
+  정답     data/학습데이터/정답라벨/<stem>.json               /api/gtlabel (읽기 전용)
+손라벨 박스가 있는 프레임은 SAM 저장소에서 빠진다(savelabel 이 빼고, 전파 저장이 건너뛴다).
+SAM: /api/sam2_mask(한 프레임 점·박스 → 마스크), /api/fuse_detect(Grounding DINO 박스 → SAM 마스크, 화재), 전파 방식 PROP_DEFAULT_MODE.
+데이터 확인: /api/sources · raw · clips · clipconds · clipinfo · frameat · warmframes · dsimg · dslabel · rawlabel · vid
+결과: /api/meta · dataset · results · queue
 """
 import json, os, re, shutil, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +38,55 @@ def _backup_labels(fl):
     except Exception:
         pass
 _CLIPS = {}       # 카테고리별 영상 목록 캐시
+
+
+def label_file(kind):
+    """손라벨 파일. kind == "person" 이면 사람, 아니면 화재."""
+    fn = "person_labels.json" if kind == "person" else "fire_labels.json"
+    return data_path("data/학습데이터/손라벨/" + fn, fn)
+
+
+def read_json(path, default):
+    try:
+        path = Path(path)
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
+    except Exception:
+        return default
+
+
+def write_json(path, obj):
+    """임시 파일에 쓰고 바꿔 넣는다(쓰다 죽어도 반쪽 파일이 남지 않는다). 프로세스마다 임시 이름이 다르다.
+    원본데이터(RAW) 아래에는 절대 쓰지 않는다: 우리가 만든 라벨은 전부 data/학습데이터 아래 별도 저장소로 간다."""
+    path = Path(path)
+    try:
+        if RAW.resolve() in path.resolve().parents:
+            raise PermissionError(f"원본데이터 아래에는 쓰지 않는다: {path}")
+    except PermissionError:
+        raise
+    except Exception:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".json.tmp{os.getpid()}")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8"); tmp.replace(path)
+
+
+def tkey(t):
+    """저장소 프레임 키. 0.5초 격자(사람 2FPS)로 맞춘 "190.5" 꼴. 화재(1초)도 같은 격자 위에 있다."""
+    return f"{round(float(t) * 2) / 2:.1f}"
+
+
+def nms_keep(dets, iou_th=0.4, cover_th=0.9):
+    """dets = [(score, x1, y1, x2, y2, ...)] 점수순으로 겹침(IoU)·포함(한쪽이 90% 이상 덮임) 중복을 뺀다."""
+    def _ov(a, b):
+        ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1]); ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        sa = (a[2] - a[0]) * (a[3] - a[1]); sb = (b[2] - b[0]) * (b[3] - b[1]); ua = sa + sb - inter
+        return (inter / ua if ua > 0 else 0.0, max(inter / sa if sa > 0 else 0.0, inter / sb if sb > 0 else 0.0))
+    keep = []
+    for d in sorted(dets, key=lambda x: -x[0]):
+        if all((lambda v: v[0] < iou_th and v[1] < cover_th)(_ov(d[1:5], k[1:5])) for k in keep):
+            keep.append(d)
+    return keep
 
 
 def data_path(*cands):
@@ -94,8 +138,7 @@ def coco_labels(rel):
     if key not in _COCO:
         idx = {}
         try:
-            import json as _json
-            d = _json.load(open(jp, encoding="utf-8"))
+            d = json.load(open(jp, encoding="utf-8"))
             info = {im["id"]: (im["file_name"], im["width"], im["height"]) for im in d.get("images", [])}
             lines = {}
             for a in d.get("annotations", []):
@@ -165,8 +208,10 @@ def _cache_write(key, obj):
 def clear_caches():
     """데이터 폴더를 옮기거나 이름을 바꾼 뒤 호출(대시보드 '캐시 새로고침' 버튼). 재시작 불필요."""
     global _SOURCES
-    _SOURCES = None; _RAW.clear(); _CLIPS.clear(); _CI.clear()
-    shutil.rmtree(CACHE_DIR, ignore_errors=True)
+    _SOURCES = None; _RAW.clear(); _CLIPS.clear(); _CI.clear(); _CONDS.clear(); _AUTOL.clear()
+    for f in CACHE_DIR.glob("*.json"):                # 폴더 스캔 결과만. 뽑아 둔 프레임(frames/)은 그대로
+        try: f.unlink()
+        except Exception: pass
 
 
 def sources():
@@ -188,11 +233,6 @@ def sources():
 
 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-# 원본 클래스 규약이 우리(0=불,1=연기)와 다른 세트. 데이터확인 요약에 경고로 띄운다(학습셋은 리매핑돼 있음)
-RAW_CLASS_NOTE = {
-    "open_azimjaan_fire": "원본 3클래스 0=구름·1=불·2=연기 (대시보드 색은 우리 규약이라 뒤바뀌어 보임. 학습셋 azimjaan_yolo 는 리매핑)",
-    "open_dfire": "원본 0=smoke·1=fire (학습셋 dfire_yolo 에서 스왑)",
-}
 _RAW = {}          # 카테고리별 파일 목록 캐시(폴더를 한 번만 훑는다)
 
 
@@ -305,15 +345,13 @@ def clip_info(clip):
 
 
 def read_frame(clip, sec, w=0):
-    _c = frame_cache_path(clip, sec, w)                    # 이미 뽑아 둔 게 있으면 바로 준다
+    """그 시각(초)의 프레임 한 장을 JPEG 바이트로. 없으면 None. w 를 주면 그 가로 픽셀로 줄인다(썸네일). 디스크 캐시 우선."""
+    _c = frame_cache_path(clip, sec, w)
     try:
         if _c.exists():
             return _c.read_bytes()
     except Exception:
         pass
-    """그 시각(초)의 프레임 한 장을 JPEG 바이트로. 없으면 None.
-    라벨은 초당 1장 기준이라 프레임 번호가 아니라 초로 받는다.
-    w 를 주면 그 가로 픽셀로 줄여 보낸다(참조 샷 썸네일)."""
     mp4 = under_raw(clip, ".mp4")
     if mp4 is None or not mp4.exists():
         return None
@@ -326,15 +364,9 @@ def read_frame(clip, sec, w=0):
     cap.release()
     if not ok:
         return None
-    q = 92
-    if w and 0 < int(w) < fr.shape[1]:      # 썸네일은 작게·가볍게
-        wh = int(round(fr.shape[0] * int(w) / fr.shape[1]))
-        fr = cv2.resize(fr, (int(w), wh), interpolation=cv2.INTER_AREA)
-        q = 78
-    ok, buf = cv2.imencode(".jpg", fr, [int(cv2.IMWRITE_JPEG_QUALITY), q])
-    if not ok:
+    data = _encode(fr, w)
+    if data is None:
         return None
-    data = buf.tobytes()
     try:                                                   # 다음 요청은 디코딩 없이
         _c.parent.mkdir(parents=True, exist_ok=True)
         _t = _c.with_suffix(f".tmp{os.getpid()}")
@@ -344,107 +376,9 @@ def read_frame(clip, sec, w=0):
     return data
 
 
-_PERSON_MODEL = None
-def person_boxes(clip, sec, conf=0.3):
-    """그 프레임에서 person 박스(YOLO 정규화 [0,cx,cy,w,h])를 person_v3(CPU)로 뽑는다. 의사라벨 프리필용."""
-    global _PERSON_MODEL
-    mp4 = under_raw(clip, ".mp4")
-    if mp4 is None or not mp4.exists():
-        return []
-    import cv2
-    cap = cv2.VideoCapture(str(mp4)); fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    cap.set(cv2.CAP_PROP_POS_FRAMES, max(int(round(float(sec) * fps)), 0))
-    ok, fr = cap.read(); cap.release()
-    if not ok:
-        return []
-    h0, w0 = fr.shape[:2]
-    if _PERSON_MODEL is None:
-        from ultralytics import YOLO
-        import torch
-        _PERSON_MODEL = YOLO(str(G / "model" / "person_v3.pt"))
-        person_boxes._dev = 0 if torch.cuda.is_available() else "cpu"
-    dev = getattr(person_boxes, "_dev", "cpu")
-    # 타일: 전체 + 4분할 + 중앙 → 멀리/작은 사람도 잡는다
-    regions = [(0, 0, w0, h0)] + [(x, y, w0 // 2, h0 // 2) for x, y in
-               ((0, 0), (w0 // 2, 0), (0, h0 // 2), (w0 // 2, h0 // 2), (w0 // 4, h0 // 4))]
-    dets = []
-    crops = [fr[oy:oy + rh, ox:ox + rw] for ox, oy, rw, rh in regions]
-    rs = _PERSON_MODEL.predict(crops, conf=conf, imgsz=640, classes=[0], device=dev, verbose=False)
-    for (ox, oy, rw, rh), r in zip(regions, rs):        # 6번 나눠 부르지 않고 한 번에(대시보드 응답이 그만큼 빨라진다)
-        for bb in r.boxes:
-            x1, y1, x2, y2 = (float(v) for v in bb.xyxy[0])
-            dets.append((float(bb.conf), x1 + ox, y1 + oy, x2 + ox, y2 + oy))
-    # NMS(IoU 0.5) 로 타일 중복 제거
-    def _iou(a, b):
-        ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1]); ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
-        iw = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1); inter = iw * ih
-        ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-        return inter / ua if ua > 0 else 0.0
-    dets.sort(key=lambda d: d[0], reverse=True)
-    keep = []
-    for d in dets:
-        if all(_iou(d[1:], k[1:]) < 0.5 for k in keep):
-            keep.append(d)
-    out = [[0, round(x1 / w0, 5), round(y1 / h0, 5),
-            round((x2 - x1) / w0, 5), round((y2 - y1) / h0, 5)] for _, x1, y1, x2, y2 in keep]
-    return out
-
-
-_GDINO = None
-GDINO_PROMPT = "a person. a pedestrian. a human. a man walking. a person with an umbrella."
-
-
-def gdino_boxes(clip, sec, th=0.30):
-    """Grounding DINO(zero-shot)로 그 프레임의 사람 박스 → YOLO 정규화 [0, x, y, w, h].
-    person_v3 가 놓치는 야간 IR·설경·원거리를 잡으라고 붙였다. 오프라인 라벨 생성 전용이고
-    배포 추론에는 안 쓴다(퀄컴 NPU). 임계 0.30 은 빈 프레임 60장에서 헛박스 0개인 값."""
-    global _GDINO
-    mp4 = under_raw(clip, ".mp4")
-    if mp4 is None or not mp4.exists():
-        return []
-    import cv2
-    cap = cv2.VideoCapture(str(mp4)); fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    cap.set(cv2.CAP_PROP_POS_FRAMES, max(int(round(float(sec) * fps)), 0))
-    ok, fr = cap.read(); cap.release()
-    if not ok:
-        return []
-    h0, w0 = fr.shape[:2]
-    import torch
-    if _GDINO is None:                       # 첫 호출에만 로드(대시보드 기동을 무겁게 하지 않는다)
-        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-        mid = "IDEA-Research/grounding-dino-base"
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
-        _GDINO = (AutoProcessor.from_pretrained(mid),
-                  AutoModelForZeroShotObjectDetection.from_pretrained(mid).to(dev).eval(), dev)
-    proc, model, dev = _GDINO
-    rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
-    with torch.no_grad():
-        inp = proc(images=rgb, text=GDINO_PROMPT, return_tensors="pt").to(dev)
-        r = proc.post_process_grounded_object_detection(
-            model(**inp), inp.input_ids, threshold=float(th), text_threshold=float(th),
-            target_sizes=[(h0, w0)])[0]
-    dets = [(float(sc), *[float(v) for v in b]) for sc, b in zip(r["scores"], r["boxes"])]
-
-    def _ov(a, b):                           # 겹침(IoU)과 포함(양방향) 을 같이 본다.
-        ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1]); ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
-        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-        sa = (a[2] - a[0]) * (a[3] - a[1]); sb = (b[2] - b[0]) * (b[3] - b[1])
-        ua = sa + sb - inter
-        return (inter / ua if ua > 0 else 0.0,
-                max(inter / sa if sa > 0 else 0.0, inter / sb if sb > 0 else 0.0))
-    dets.sort(key=lambda d: d[0], reverse=True)
-    keep = []
-    for d in dets:
-        if all((lambda v: v[0] < 0.4 and v[1] < 0.9)(_ov(d[1:], k[1:])) for k in keep):
-            keep.append(d)
-    return [[0, round(x1 / w0, 5), round(y1 / h0, 5),
-             round((x2 - x1) / w0, 5), round((y2 - y1) / h0, 5)] for _, x1, y1, x2, y2 in keep]
-
-
 AUTOLABEL_DIR = G / "data/학습데이터/자동라벨/dino"
 _SAM2 = None
 SAM2_ID = "facebook/sam2.1-hiera-small"
-SAM2_MIN_SCORE = 0.60          # 이보다 낮으면 마스크가 화면 전체로 번지는 실패 사례가 나온다
 
 
 _AUTOL = {}
@@ -465,54 +399,6 @@ def autolabel_of(clip):
         return None
     _AUTOL[k] = (f.stat().st_mtime, d)
     return d
-
-
-def sam2_box(clip, sec, px, py):
-    """정규화 좌표 (px,py) 한 점을 프롬프트로 SAM2 마스크 → 타이트 박스 + 외곽선.
-    반환 [0, x, y, w, h] 와 폴리곤(정규화). 점수가 낮으면 None."""
-    global _SAM2
-    mp4 = under_raw(clip, ".mp4")
-    if mp4 is None or not mp4.exists():
-        return None, None, 0.0
-    import cv2, numpy as np, torch
-    cap = cv2.VideoCapture(str(mp4)); fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    cap.set(cv2.CAP_PROP_POS_FRAMES, max(int(round(float(sec) * fps)), 0))
-    ok, fr = cap.read(); cap.release()
-    if not ok:
-        return None, None, 0.0
-    h0, w0 = fr.shape[:2]
-    if _SAM2 is None:
-        from transformers.models.sam2.processing_sam2 import Sam2Processor
-        from transformers.models.sam2.modeling_sam2 import Sam2Model
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
-        _SAM2 = (Sam2Processor.from_pretrained(SAM2_ID),
-                 Sam2Model.from_pretrained(SAM2_ID).to(dev).eval(), dev)
-    proc, model, dev = _SAM2
-    pt = [float(px) * w0, float(py) * h0]
-    rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
-    with torch.no_grad():
-        inp = proc(images=rgb, input_points=[[[pt]]], input_labels=[[[1]]], return_tensors="pt").to(dev)
-        out = model(**inp, multimask_output=True)
-        masks = proc.post_process_masks(out.pred_masks.cpu(), inp["original_sizes"])[0][0]
-        scores = out.iou_scores[0][0].cpu().numpy()
-    best = int(np.argmax(scores)); score = float(scores[best])
-    if score < SAM2_MIN_SCORE:
-        return None, None, score
-    m = masks[best].numpy().astype("uint8")
-    ys, xs = m.nonzero()
-    if len(xs) == 0:
-        return None, None, score
-    x1, y1, x2, y2 = float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
-    if (x2 - x1) < 3 or (y2 - y1) < 3 or (x2 - x1) * (y2 - y1) > 0.5 * w0 * h0:
-        return None, None, score          # 너무 작거나 화면 절반을 덮으면 실패로 본다
-    box = [0, round(x1 / w0, 5), round(y1 / h0, 5), round((x2 - x1) / w0, 5), round((y2 - y1) / h0, 5)]
-    cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    poly = []
-    if cs:
-        c = max(cs, key=cv2.contourArea)
-        c = cv2.approxPolyDP(c, 0.004 * cv2.arcLength(c, True), True)
-        poly = [[round(float(q[0][0]) / w0, 4), round(float(q[0][1]) / h0, 4)] for q in c]
-    return box, poly, score
 
 
 _CONDS = {}
@@ -649,62 +535,6 @@ def _read_frames(clip, t0, t1, step):
     return frames, times, W, H
 
 
-def sam2_propagate(clip, t_seed, box=None, point=None, back=15.0, fwd=15.0, step=0.5):
-    """씨앗 프레임의 박스(또는 점) 하나를 앞뒤로 전파한다. 반환 {시각: [x,y,w,h] 정규화}"""
-    global _SAM2V
-    import numpy as np, torch, time
-    t0 = max(0.0, float(t_seed) - float(back))
-    t1 = float(t_seed) + float(fwd)
-    frames, times, W, H = _read_frames(clip, t0, t1, float(step))
-    if not frames:
-        return {}, 0, "프레임 없음"
-    # 씨앗 프레임의 위치(가장 가까운 것)
-    si = min(range(len(times)), key=lambda i: abs(times[i] - float(t_seed)))
-    if _SAM2V is None:
-        from transformers.models.sam2_video.processing_sam2_video import Sam2VideoProcessor
-        from transformers.models.sam2_video.modeling_sam2_video import Sam2VideoModel
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
-        _SAM2V = (Sam2VideoProcessor.from_pretrained(SAM2V_ID),
-                  Sam2VideoModel.from_pretrained(SAM2V_ID).to(dev).eval(), dev)
-    proc, model, dev = _SAM2V
-    tic = time.time()
-    sess = proc.init_video_session(video=frames, inference_device=dev, dtype=torch.float32)
-    if box:                                    # 정규화 [x,y,w,h] → 픽셀 [x1,y1,x2,y2]
-        bx = [[float(box[0]) * W, float(box[1]) * H,
-               (float(box[0]) + float(box[2])) * W, (float(box[1]) + float(box[3])) * H]]
-        proc.add_inputs_to_inference_session(sess, frame_idx=si, obj_ids=[1],
-                                             input_boxes=[bx], original_size=(H, W))
-    else:
-        pt = [[[float(point[0]) * W, float(point[1]) * H]]]
-        proc.add_inputs_to_inference_session(sess, frame_idx=si, obj_ids=[1],
-                                             input_points=[pt], input_labels=[[[1]]], original_size=(H, W))
-    out = {}
-
-    def collect(rev):
-        # 씨앗 프레임에서 시작해 한 방향으로 전파한다(뒤쪽은 reverse=True 로 다시 한 번).
-        for r in model.propagate_in_video_iterator(sess, start_frame_idx=si, reverse=rev):
-            i = int(r.frame_idx)
-            m = proc.post_process_masks(r.pred_masks.unsqueeze(0).cpu().float(), [(H, W)], binarize=True)[0]
-            arr = np.asarray(m.numpy() if hasattr(m, "numpy") else m)
-            a = arr
-            while a.ndim > 2:                   # (1,1,H,W) · (1,H,W) 어느 쪽이든 2차원으로
-                a = a[0]
-            ys, xs = np.nonzero(a > 0)
-            if len(xs) < 20:
-                continue
-            x1, y1, x2, y2 = float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
-            if (x2 - x1) * (y2 - y1) > 0.5 * W * H:
-                continue                        # 화면 절반을 넘게 덮으면 실패로 본다
-            out[f"{times[i]:.1f}"] = [round(x1 / W, 5), round(y1 / H, 5),
-                                      round((x2 - x1) / W, 5), round((y2 - y1) / H, 5)]
-
-    with torch.no_grad():
-        collect(False)
-        collect(True)
-    return out, round(time.time() - tic, 1), None
-
-
-_EMB_CACHE = {}                 # (clip, 초) → SAM2 이미지 임베딩
 _FRAME_PREP = {}                # (clip, 초) → dict(w0, h0, rgb, orig, resh). 프레임 디코딩·전처리 결과
 
 
@@ -810,71 +640,56 @@ def sam2_mask_pts(clip, sec, pts, box=None):
     return bx, poly, score
 
 
-def sam2_propagate_multi(clip, seeds, back=10.0, fwd=10.0, step=0.5):
-    """참조샷 여러 개로 한 객체를 전파한다.
-    seeds = [{"t": 초, "box": [x,y,w,h] 정규화}] · 반환 ({시각: [x,y,w,h]}, 걸린초, 오류)"""
+PROP_DEFAULT_MODE = "separate"   # 전파 방식 기본값: separate(객체별 독립 세션) · joint(한 세션) · detect(프레임마다 DINO+SAM). eval_prop_modes.py 결과로 정한다
+PROP_THR = {1: 0.0, 2: 0.0}      # 객체별 마스크 로짓 임계(독립 적용). 연기(2)를 낮추면 흐린 연기를 더 담는다
+
+
+def _poly_of(arr, W, H, eps=0.004):
+    """이진 마스크 → 가장 큰 윤곽선(정규화 좌표, 단순화). 화면에 객체별 층으로 그린다."""
+    import cv2
+    cs, _ = cv2.findContours((arr > 0).astype("uint8"), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cs:
+        return []
+    c = max(cs, key=cv2.contourArea)
+    c = cv2.approxPolyDP(c, eps * cv2.arcLength(c, True), True)
+    return [[round(float(q[0][0]) / W, 4), round(float(q[0][1]) / H, 4)] for q in c]
+
+
+def _seed_inputs(sd, W, H):
+    """참조샷 하나 → SAM2 비디오 세션 입력(픽셀 박스 + 있으면 포함/제외 점). 점만 있고 박스가 없는 참조도 된다."""
+    kw = {}
+    b = sd.get("box")
+    if b:
+        kw["input_boxes"] = [[[float(b[0]) * W, float(b[1]) * H, (float(b[0]) + float(b[2])) * W, (float(b[1]) + float(b[3])) * H]]]
+    pts = [q for q in (sd.get("pts") or []) if len(q) >= 3]
+    if pts:
+        kw["input_points"] = [[[[float(q[0]) * W, float(q[1]) * H] for q in pts]]]
+        kw["input_labels"] = [[[int(q[2]) for q in pts]]]
+    return kw
+
+
+def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None, a=None, b=None, mode=None, thr=None):
+    """여러 객체 전파. seeds = [{"t": 초, "box": [x,y,w,h], "obj": 번호, "pts": [[x,y,label],...]}]
+    구간: a·b(초)를 주면 그 구간만(교정 전파), 없으면 참조샷 앞뒤 back·fwd 초.
+    mode: separate(객체마다 독립 세션·독립 임계 → 서로 뭉개지지 않는다) · joint(한 세션에 전 객체) · detect(프레임마다 DINO 박스 → SAM 마스크)
+    반환 ({시각: {obj: [x,y,w,h]}}, {시각: {obj: 윤곽선}}, 걸린초, 오류)"""
     global _SAM2V
     import numpy as np, torch, time
+    mode = mode or PROP_DEFAULT_MODE
+    thr = {int(k): float(v) for k, v in (thr or PROP_THR).items()}
     if not seeds:
-        return {}, 0, "참조샷 없음"
+        return {}, {}, 0, "참조샷 없음"
     ts = [float(x["t"]) for x in seeds]
-    t0 = max(0.0, min(ts) - float(back)); t1 = max(ts) + float(fwd)
+    t0 = max(0.0, min(ts) - float(back)) if a is None else max(0.0, float(a))
+    t1 = (max(ts) + float(fwd)) if b is None else float(b)
+    seeds = [sd for sd in seeds if t0 - 1e-6 <= float(sd["t"]) <= t1 + 1e-6]   # 구간 밖 참조는 이번 전파에 안 쓴다
+    if not seeds:
+        return {}, {}, 0, "구간 안 참조샷 없음"
+    if mode == "detect":
+        return propagate_detect(clip, seeds, t0, t1, float(step), progress)
     frames, times, W, H = _read_frames(clip, t0, t1, float(step))
     if not frames:
-        return {}, 0, "프레임 없음"
-    if _SAM2V is None:
-        from transformers.models.sam2_video.processing_sam2_video import Sam2VideoProcessor
-        from transformers.models.sam2_video.modeling_sam2_video import Sam2VideoModel
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
-        _SAM2V = (Sam2VideoProcessor.from_pretrained(SAM2V_ID),
-                  Sam2VideoModel.from_pretrained(SAM2V_ID).to(dev).eval(), dev)
-    proc, model, dev = _SAM2V
-    tic = time.time()
-    sess = proc.init_video_session(video=frames, inference_device=dev, dtype=torch.float32)
-    idxs = []
-    for sd in seeds:                          # 참조샷마다 그 프레임에 박스를 넣는다(같은 객체 id 1)
-        si = min(range(len(times)), key=lambda i: abs(times[i] - float(sd["t"])))
-        b = sd["box"]
-        bx = [[float(b[0]) * W, float(b[1]) * H, (float(b[0]) + float(b[2])) * W, (float(b[1]) + float(b[3])) * H]]
-        proc.add_inputs_to_inference_session(sess, frame_idx=si, obj_ids=[1],
-                                             input_boxes=[bx], original_size=(H, W))   # 프레임별 입력은 따로 저장된다
-        idxs.append(si)
-    out = {}
-
-    def collect(start, rev):
-        for r in model.propagate_in_video_iterator(sess, start_frame_idx=start, reverse=rev):
-            i = int(r.frame_idx)
-            m = proc.post_process_masks(r.pred_masks.unsqueeze(0).cpu().float(), [(H, W)], binarize=True)[0]
-            a = np.asarray(m.numpy() if hasattr(m, "numpy") else m)
-            while a.ndim > 2:
-                a = a[0]
-            ys, xs = np.nonzero(a > 0)
-            if len(xs) < 20:
-                continue
-            x1, y1, x2, y2 = float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
-            if (x2 - x1) * (y2 - y1) > 0.5 * W * H:
-                continue
-            out[f"{times[i]:.1f}"] = [round(x1 / W, 5), round(y1 / H, 5),
-                                      round((x2 - x1) / W, 5), round((y2 - y1) / H, 5)]
-
-    with torch.no_grad():
-        collect(min(idxs), False)             # 첫 참조샷에서 앞으로
-        collect(min(idxs), True)              # 첫 참조샷에서 뒤로
-    return out, round(time.time() - tic, 1), None
-
-
-def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None):
-    """여러 객체를 한 세션에서 전파. seeds = [{"t": 초, "box": [x,y,w,h], "obj": 번호}]
-    반환 ({시각: {obj: [x,y,w,h]}}, 걸린초, 오류)"""
-    global _SAM2V
-    import numpy as np, torch, time
-    if not seeds:
-        return {}, 0, "참조샷 없음"
-    ts = [float(x["t"]) for x in seeds]
-    t0 = max(0.0, min(ts) - float(back)); t1 = max(ts) + float(fwd)
-    frames, times, W, H = _read_frames(clip, t0, t1, float(step))
-    if not frames:
-        return {}, 0, "프레임 없음"
+        return {}, {}, 0, "프레임 없음"
     if _SAM2V is None:
         from transformers.models.sam2_video.processing_sam2_video import Sam2VideoProcessor
         from transformers.models.sam2_video.modeling_sam2_video import Sam2VideoModel
@@ -890,12 +705,9 @@ def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None
     by_obj = {}
     for sd in seeds:
         by_obj.setdefault(int(sd.get("obj", 1)), []).append(sd)
-    out = {}
+    out, polys = {}, {}
     if progress is not None:
-        progress["total"] = len(frames) * len(by_obj); progress["done"] = 0
-
-    def to_px(b):
-        return [float(b[0]) * W, float(b[1]) * H, (float(b[0]) + float(b[2])) * W, (float(b[1]) + float(b[3])) * H]
+        progress["total"] = len(frames) * (1 if mode == "joint" else len(by_obj)); progress["done"] = 0
 
     def area_at(prof, tsec):
         """참조샷 (시각, 넓이) 목록에서 tsec 의 기준 넓이(선형 보간, 밖은 가장 가까운 값)."""
@@ -911,147 +723,325 @@ def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None
                 return a0 + (a1 - a0) * w
         return prof[-1][1]
 
-    def run_segment(oid, i0, i1, seed_i, box, prof, rev):
-        """frames[i0..i1] 구간을 seed_i(구간 안 인덱스) 의 박스 하나로 조건 걸고 rev 방향으로 전파."""
-        if i1 < i0:
+    def take(gi, oid, arr, prof):
+        """한 프레임·한 객체의 이진 마스크 → 박스·윤곽선 기록. 참조 박스 넓이 대비 3배/1/3 밖이면 흘러간 것으로 버린다."""
+        bb = _mask_bbox(arr)
+        if bb is None:
             return
-        sub = frames[i0:i1 + 1]
-        sess = proc.init_video_session(video=sub, inference_device=dev, dtype=torch.float32)
-        proc.add_inputs_to_inference_session(sess, frame_idx=seed_i - i0, obj_ids=[oid], input_boxes=[[to_px(box)]], original_size=(H, W))
-        for r in model.propagate_in_video_iterator(sess, start_frame_idx=seed_i - i0, reverse=rev):
-            gi = i0 + int(r.frame_idx)
-            if progress is not None:
-                if progress.get("cancel"):
-                    raise RuntimeError("cancelled")
-                progress["done"] = min(progress.get("done", 0) + 1, progress["total"])
-            sc = r.object_score_logits
-            if sc is not None and float(sc.detach().flatten()[0]) <= 0:      # 대상 없음(가림·이탈)
+        x1, y1, x2, y2 = bb
+        area = (x2 - x1) * (y2 - y1)
+        sa = area_at(prof, times[gi]) or area
+        if area > 0.5 * W * H or area > 3.0 * sa or area < sa / 3.0:
+            return
+        k = f"{times[gi]:.1f}"
+        out.setdefault(k, {})[str(oid)] = [round(x1 / W, 5), round(y1 / H, 5), round((x2 - x1) / W, 5), round((y2 - y1) / H, 5)]
+        polys.setdefault(k, {})[str(oid)] = _poly_of(arr, W, H)
+
+    def tick():
+        if progress is not None:
+            if progress.get("cancel"):
+                raise RuntimeError("cancelled")
+            progress["done"] = min(progress.get("done", 0) + 1, progress["total"])
+
+    def masks_of(r, oids):
+        """전파 결과 한 프레임 → {obj: 이진 마스크}. 객체마다 자기 임계로 독립 이진화(argmax 없음 → 불·연기가 서로를 지우지 않는다)."""
+        pm = r.pred_masks.cpu().float()                 # (객체수, 1, 256, 256)
+        if pm.ndim == 4:
+            pm = pm.unsqueeze(0)                        # 프로세서는 (영상 1, 객체수, 1, h, w) 를 받아 [0] → (객체수, 1, H, W) 를 준다
+        sc = r.object_score_logits
+        res = {}
+        for j, oid in enumerate(oids):
+            if sc is not None and sc.numel() > j and float(sc.detach().flatten()[j]) <= 0:   # 대상 없음(가림·이탈)
                 continue
-            m = proc.post_process_masks(r.pred_masks.unsqueeze(0).cpu().float(), [(H, W)], binarize=True)[0]
+            one = pm[:, j:j + 1] if pm.shape[1] > j else pm
+            m = proc.post_process_masks(one, [(H, W)], binarize=True, mask_threshold=thr.get(oid, 0.0))[0]
             arr = np.asarray(m.numpy() if hasattr(m, "numpy") else m)
             while arr.ndim > 2:
                 arr = arr[0]
-            bb = _mask_bbox(arr)
-            if bb is None:
-                continue
-            x1, y1, x2, y2 = bb
-            area = (x2 - x1) * (y2 - y1)
-            sa = area_at(prof, times[gi]) or area
-            if area > 0.5 * W * H or area > 3.0 * sa or area < sa / 3.0:     # 근처 참조 박스 대비 3배 넘게 커지거나 1/3 아래 = 흘러감
-                continue
-            out.setdefault(f"{times[gi]:.1f}", {})[str(oid)] = [round(x1 / W, 5), round(y1 / H, 5),
-                                                                 round((x2 - x1) / W, 5), round((y2 - y1) / H, 5)]
+            res[oid] = arr
+        return res
+
+    def run_segment(inputs, i0, i1, seed_i, profs, rev):
+        """frames[i0..i1] 구간. inputs = {obj: 참조샷} 를 seed_i 프레임에 조건으로 넣고 rev 방향으로 전파."""
+        if i1 < i0 or not inputs:
+            return
+        sess = proc.init_video_session(video=frames[i0:i1 + 1], inference_device=dev, dtype=torch.float32)
+        oids = sorted(inputs)
+        if len(oids) == 1:                              # obj_ids 는 복사해서 넘긴다(프로세서가 넘긴 리스트를 비운다)
+            proc.add_inputs_to_inference_session(sess, frame_idx=seed_i - i0, obj_ids=list(oids), original_size=(H, W), **_seed_inputs(inputs[oids[0]], W, H))
+        else:                                           # 공동: 여러 객체를 한 번에(박스만). 객체마다 따로 넣으면 같은 프레임의 조건 기억이 비어 전파가 깨진다
+            bxs = [_seed_inputs(inputs[o], W, H).get("input_boxes", [[[0, 0, 1, 1]]])[0][0] for o in oids]
+            proc.add_inputs_to_inference_session(sess, frame_idx=seed_i - i0, obj_ids=list(oids), original_size=(H, W), input_boxes=[bxs])
+        for r in model.propagate_in_video_iterator(sess, start_frame_idx=seed_i - i0, reverse=rev):
+            gi = i0 + int(r.frame_idx); tick()
+            for oid, arr in masks_of(r, oids).items():
+                take(gi, oid, arr, profs.get(oid) or [])
         del sess
         torch.cuda.empty_cache()
 
+    def prof_of(sds):
+        return [(float(sd["t"]), float(sd["box"][2]) * W * float(sd["box"][3]) * H) for sd in sds if sd.get("box")]
+
     with torch.no_grad():
-        for oid in sorted(by_obj):
-            sds = sorted(by_obj[oid], key=lambda sd: float(sd["t"]))
-            prof = [(float(sd["t"]), float(sd["box"][2]) * W * float(sd["box"][3]) * H) for sd in sds]
-            idxs = [fidx(sd["t"]) for sd in sds]
-            # 1) 구간 시작 → 첫 참조 (역방향)
-            run_segment(oid, 0, idxs[0], idxs[0], sds[0]["box"], prof, True)
-            # 2) 참조 k → 참조 k+1 직전 (정방향), 마지막 참조 → 끝
-            for k, sd in enumerate(sds):
-                i0 = idxs[k]
-                i1 = (idxs[k + 1] - 1) if k + 1 < len(sds) else (len(frames) - 1)
-                if k + 1 < len(sds) and idxs[k + 1] == i0:    # 같은 프레임에 참조가 둘이면 뒤 것만
-                    continue
-                run_segment(oid, i0, max(i0, i1), i0, sd["box"], prof, False)
-    return out, round(time.time() - tic, 1), None
+        if mode == "joint":
+            # 공동: 참조 시각의 합집합으로 구간을 나누고, 각 구간 시작에 모든 객체를 한 세션에 넣는다(구간 시작에 참조가 없는 객체는 가장 가까운 참조 박스)
+            profs = {oid: prof_of(sorted(sds, key=lambda sd: float(sd["t"]))) for oid, sds in by_obj.items()}
+            tset = sorted({fidx(sd["t"]) for sd in seeds})
+            def nearest(oid, i):
+                return min(by_obj[oid], key=lambda sd: abs(fidx(sd["t"]) - i))
+            run_segment({oid: nearest(oid, tset[0]) for oid in by_obj}, 0, tset[0], tset[0], profs, True)
+            for k, i0 in enumerate(tset):
+                i1 = (tset[k + 1] - 1) if k + 1 < len(tset) else (len(frames) - 1)
+                run_segment({oid: nearest(oid, i0) for oid in by_obj}, i0, max(i0, i1), i0, profs, False)
+        else:
+            # 분리(기본): 객체마다 자기 세션. 구간 = [시작 → 첫 참조](역방향), [참조 k → 참조 k+1)(정방향), [마지막 참조 → 끝]
+            for oid in sorted(by_obj):
+                sds = sorted(by_obj[oid], key=lambda sd: float(sd["t"]))
+                profs = {oid: prof_of(sds)}
+                idxs = [fidx(sd["t"]) for sd in sds]
+                run_segment({oid: sds[0]}, 0, idxs[0], idxs[0], profs, True)
+                for k, sd in enumerate(sds):
+                    i0 = idxs[k]
+                    i1 = (idxs[k + 1] - 1) if k + 1 < len(sds) else (len(frames) - 1)
+                    if k + 1 < len(sds) and idxs[k + 1] == i0:    # 같은 프레임에 참조가 둘이면 뒤 것만
+                        continue
+                    run_segment({oid: sd}, i0, max(i0, i1), i0, profs, False)
+    return out, polys, round(time.time() - tic, 1), None
 
 
-_BG_DINO = {}                   # clip → {"done": n, "total": n, "running": bool}
-_BG_LOCK = threading.Lock()
+# ---------- Grounding DINO(zero-shot 박스) + SAM2(마스크) 융합: 형태가 모호한 연기용 ----------
+_GDINO = None
+GDINO_FIRE_PROMPT = "fire. flame. smoke."
+GDINO_PERSON_PROMPT = "a person. a pedestrian. a human. a man walking. a person with an umbrella."
 
 
-def gdino_boxes_bgr(fr, th=0.25):
-    """프레임(BGR 배열) 한 장의 DINO 사람 박스 → [[0,x,y,w,h,score]] (배치 스크립트와 같은 NMS)."""
+def gdino_detect(fr_bgr, prompt, th=0.25):
+    """프레임(BGR) 한 장에서 프롬프트의 물체 박스. 반환 [(score, x1, y1, x2, y2, label)] 픽셀, 중복 제거."""
     global _GDINO
     import cv2, torch
-    h0, w0 = fr.shape[:2]
-    if _GDINO is None:
-        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+    h0, w0 = fr_bgr.shape[:2]
+    if _GDINO is None:                       # 첫 호출에만 로드(대시보드 기동을 무겁게 하지 않는다)
+        from transformers.models.grounding_dino.processing_grounding_dino import GroundingDinoProcessor      # transformers 5.x: Auto* 가 없다
+        from transformers.models.grounding_dino.modeling_grounding_dino import GroundingDinoForObjectDetection
         mid = "IDEA-Research/grounding-dino-base"
         dev = "cuda" if torch.cuda.is_available() else "cpu"
-        _GDINO = (AutoProcessor.from_pretrained(mid), AutoModelForZeroShotObjectDetection.from_pretrained(mid).to(dev).eval(), dev)
+        _GDINO = (GroundingDinoProcessor.from_pretrained(mid), GroundingDinoForObjectDetection.from_pretrained(mid).to(dev).eval(), dev)
     proc, model, dev = _GDINO
-    rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+    rgb = cv2.cvtColor(fr_bgr, cv2.COLOR_BGR2RGB)
     with torch.no_grad():
-        inp = proc(images=rgb, text=GDINO_PROMPT, return_tensors="pt").to(dev)
-        r = proc.post_process_grounded_object_detection(model(**inp), inp.input_ids, threshold=float(th),
-                                                         text_threshold=float(th), target_sizes=[(h0, w0)])[0]
-    dets = sorted([(float(sc), *[float(v) for v in b]) for sc, b in zip(r["scores"], r["boxes"])], key=lambda x: -x[0])
-
-    def _ov(a, b):
-        ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1]); ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
-        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-        sa = (a[2]-a[0])*(a[3]-a[1]); sb = (b[2]-b[0])*(b[3]-b[1]); ua = sa + sb - inter
-        return (inter/ua if ua > 0 else 0.0, max(inter/sa if sa > 0 else 0.0, inter/sb if sb > 0 else 0.0))
-    keep = []
-    for d in dets:
-        if all((lambda v: v[0] < 0.4 and v[1] < 0.9)(_ov(d[1:], k[1:])) for k in keep):
-            keep.append(d)
-    return [[0, round(x1/w0, 5), round(y1/h0, 5), round((x2-x1)/w0, 5), round((y2-y1)/h0, 5), round(sc, 3)]
-            for sc, x1, y1, x2, y2 in keep]
+        inp = proc(images=rgb, text=prompt, return_tensors="pt").to(dev)
+        r = proc.post_process_grounded_object_detection(model(**inp), inp.input_ids, threshold=float(th), text_threshold=float(th), target_sizes=[(h0, w0)])[0]
+    labels = r.get("text_labels") or r.get("labels") or [""] * len(r["scores"])
+    dets = [(float(sc), *[float(v) for v in bx], str(lb)) for sc, bx, lb in zip(r["scores"], r["boxes"], labels)]
+    return nms_keep(dets)
 
 
-def bg_dino_start(clip, t_center, span=30.0, step=0.5):
-    """현재 프레임 앞뒤 span 초를 DINO 로 훑어 자동라벨 파일에 채운다(백그라운드). 이미 있는 시각은 건너뛴다."""
-    with _BG_LOCK:
-        st = _BG_DINO.get(clip)
-        if st and st.get("running"):
-            return st
-        st = _BG_DINO[clip] = {"done": 0, "total": 0, "running": True}
+def _frame_bgr(clip, sec):
+    """프레임 한 장(BGR). 디스크 캐시 → 없으면 영상에서 뽑는다."""
+    import cv2, numpy as np
+    data = read_frame(clip, sec, 0)
+    if data is None:
+        return None
+    return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
 
-    def work():
-        try:
-            import cv2
-            mp4 = under_raw(clip, ".mp4")
-            if mp4 is None or not mp4.exists():
-                return
-            f = AUTOLABEL_DIR / (Path(clip).stem + ".json")
-            d = autolabel_of(clip) or {"clip": Path(clip).stem, "frames": {}, "th": 0.25, "step": step,
-                                        "model": "grounding-dino-base"}
-            cap = cv2.VideoCapture(str(mp4)); fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280); H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
-            dur = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / fps
-            d.setdefault("W", W); d.setdefault("H", H)
-            t0 = max(0.0, float(t_center) - span); t1 = min(dur, float(t_center) + span)
-            ts = []
-            t = t0
-            while t <= t1 + 1e-6:
-                if f"{t:.1f}" not in d["frames"]:
-                    ts.append(round(t, 2))
-                t = round(t + step, 3)
-            st["total"] = len(ts)
-            for n, t in enumerate(ts, 1):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, max(int(round(t * fps)), 0))
-                ok, fr = cap.read()
-                if ok:
-                    try:
-                        boxes = gdino_boxes_bgr(fr, 0.25)
-                    except Exception:
-                        boxes = []
-                    d["frames"][f"{t:.1f}"] = boxes
-                st["done"] = n
-                if n % 10 == 0 or n == len(ts):                     # 10장마다 저장 → 페이지가 중간 결과를 본다
-                    AUTOLABEL_DIR.mkdir(parents=True, exist_ok=True)
-                    tmp = f.with_suffix(f".json.tmp{os.getpid()}")
-                    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8"); tmp.replace(f)
-                    _AUTOL.pop(str(f), None)
-            cap.release()
-        finally:
-            st["running"] = False
 
-    threading.Thread(target=work, daemon=True).start()
-    return st
+def fuse_detect(clip, sec, th=0.25):
+    """화재 프레임: DINO 로 불·연기 박스를 찾고 SAM2 로 마스크를 따서 객체(1 불 · 2 연기)마다 가장 점수 높은 하나를 돌려준다.
+    반환 {obj: {"box": [x,y,w,h], "poly": [...], "score": DINO 점수, "label": 텍스트}}"""
+    fr = _frame_bgr(clip, sec)
+    if fr is None:
+        return {}
+    h0, w0 = fr.shape[:2]
+    best = {}
+    for sc, x1, y1, x2, y2, lb in gdino_detect(fr, GDINO_FIRE_PROMPT, th):
+        obj = 2 if "smoke" in lb.lower() else 1
+        if obj in best and best[obj]["score"] >= sc:
+            continue
+        nb = [round(x1 / w0, 5), round(y1 / h0, 5), round((x2 - x1) / w0, 5), round((y2 - y1) / h0, 5)]
+        bx, poly, s2 = sam2_mask_pts(clip, sec, [], nb)
+        best[obj] = {"box": bx or nb, "poly": poly or [], "score": round(sc, 3), "sam": round(float(s2), 3), "label": lb}
+    return best
+
+
+def propagate_detect(clip, seeds, t0, t1, step, progress=None):
+    """전파 방식 detect: 프레임마다 DINO 박스 → 참조/직전 박스와 가장 가까운 것을 그 객체로 → SAM 마스크.
+    시간 기억이 없어 SAM2 전파보다 흔들리지만 연기처럼 형태가 바뀌는 대상에서 이탈이 없다. 비교 실험용."""
+    import time
+    tic = time.time()
+    by_obj = {}
+    for sd in seeds:
+        by_obj.setdefault(int(sd.get("obj", 1)), []).append(sd)
+    ts = []
+    t = t0
+    while t <= t1 + 1e-6:
+        ts.append(round(t, 2)); t = round(t + step, 3)
+    if progress is not None:
+        progress["total"] = len(ts); progress["done"] = 0
+    fr0 = _frame_bgr(clip, ts[0]) if ts else None
+    if fr0 is None:
+        return {}, {}, 0, "프레임 없음"
+    h0, w0 = fr0.shape[:2]
+    last = {oid: min(sds, key=lambda sd: abs(float(sd["t"]) - t0))["box"] for oid, sds in by_obj.items()}   # 객체별 직전 박스(정규화)
+    out, polys = {}, {}
+
+    def iou(a, b):
+        x1 = max(a[0], b[0]); y1 = max(a[1], b[1]); x2 = min(a[0] + a[2], b[0] + b[2]); y2 = min(a[1] + a[3], b[1] + b[3])
+        inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        return inter / (a[2] * a[3] + b[2] * b[3] - inter or 1.0)
+
+    for t in ts:
+        if progress is not None:
+            if progress.get("cancel"):
+                raise RuntimeError("cancelled")
+            progress["done"] += 1
+        for oid, sds in by_obj.items():                 # 참조 프레임은 참조 박스를 그대로 쓴다
+            hit = next((sd for sd in sds if abs(float(sd["t"]) - t) < 1e-3), None)
+            if hit:
+                last[oid] = hit["box"]
+        fr = _frame_bgr(clip, t)
+        if fr is None:
+            continue
+        dets = gdino_detect(fr, GDINO_FIRE_PROMPT, 0.2)
+        for oid in by_obj:
+            want_smoke = (oid == 2)
+            cands = []
+            for sc, x1, y1, x2, y2, lb in dets:
+                if ("smoke" in lb.lower()) != want_smoke:
+                    continue
+                nb = [x1 / w0, y1 / h0, (x2 - x1) / w0, (y2 - y1) / h0]
+                ref = last.get(oid)
+                v = iou(nb, ref) if ref else 0.0
+                cx = nb[0] + nb[2] / 2 - (ref[0] + ref[2] / 2 if ref else 0.5); cy = nb[1] + nb[3] / 2 - (ref[1] + ref[3] / 2 if ref else 0.5)
+                cands.append((v, -(cx * cx + cy * cy), sc, nb))
+            cands = [c for c in cands if c[0] > 0.05 or -c[1] < 0.02]   # 직전 박스와 겹치거나 아주 가까운 것만
+            if not cands:
+                continue
+            _, _, sc, nb = max(cands)
+            bx, poly, _s = sam2_mask_pts(clip, t, [], nb)
+            if not bx:
+                continue
+            k = f"{t:.1f}"
+            out.setdefault(k, {})[str(oid)] = [round(v, 5) for v in bx]
+            polys.setdefault(k, {})[str(oid)] = poly or []
+            last[oid] = bx
+    return out, polys, round(time.time() - tic, 1), None
 
 
 _PROP_JOBS = {}                  # id → {"done","total","running","result","err","sec"}
 _PROP_SEQ = [0]
 SAM2_DIR = G / "data/학습데이터/자동라벨/sam2"
-GT_DIR = G / "data/학습데이터/정답라벨"       # 데이터셋이 제공한 정답(박스·점). 사람이 고치면 손라벨로 승격
+GT_DIR = G / "data/학습데이터/정답라벨"       # 데이터셋이 제공한 정답의 '복사본'(박스·점·이벤트). 원본 XML/JSON 은 읽기만 한다. 사람이 고치면 손라벨로 간다
+
+
+def _hms(s):
+    h, m, sec = str(s).strip().split(":"); return int(h) * 3600 + int(m) * 60 + float(sec)
+
+
+def derive_gt(clip):
+    """원본 옆 정답 파일(XML/JSON)을 읽어 정답라벨 저장소 형식 {frames, points, events, actions, ...} 으로 바꾼다. 원본은 건드리지 않는다.
+    - AI허브 171 XML: 객체별 키프레임 점(x,y) → points, 행동 구간 → actions, 이벤트 → events
+    - KISA XML(Alarm): events 만
+    - AI허브 JSON(침입·쓰러짐 event_frame): events 만
+    - AI허브 71953 다각도 JSON(폴더 단위, videos[] + annotations.caption[view]): 그 영상(view)의 설명·이벤트 종류 → meta
+    반환 dict 또는 None(원본 정답 없음)."""
+    mp4 = under_raw(clip, ".mp4")
+    if mp4 is None:
+        return None
+    stem = Path(clip).stem
+    src_rel = None
+    d = {"clip": stem, "frames": {}, "points": {}, "actions": {}, "events": [], "derived": True}
+    xml = under_raw(clip, ".xml")
+    if xml is not None and xml.exists():
+        import xml.etree.ElementTree as ET
+        try:
+            r = ET.parse(xml).getroot()
+        except Exception:
+            r = None
+        if r is not None and r.find("object") is not None and r.find("object/position/keypoint") is not None:   # AI허브 171 형식
+            W = int(r.findtext("size/width") or 0); H = int(r.findtext("size/height") or 0); fps = float(r.findtext("header/fps") or 30)
+            for ev in r.findall("event"):
+                try:
+                    d["events"].append({"name": ev.findtext("eventname"), "start": _hms(ev.findtext("starttime")), "dur": _hms(ev.findtext("duration"))})
+                except Exception:
+                    pass
+            for oi, ob in enumerate(r.findall("object"), 1):
+                name = ob.findtext("objectname") or f"person_{oi}"
+                m = re.search(r"(\d+)$", name); oid = int(m.group(1)) if m else oi
+                for pos in ob.findall("position"):
+                    kf = pos.findtext("keyframe"); kx = pos.findtext("keypoint/x"); ky = pos.findtext("keypoint/y")
+                    if kf and kx and ky and W and H:
+                        d["points"].setdefault(tkey(int(kf) / fps), {})[str(oid)] = [round(float(kx) / W, 5), round(float(ky) / H, 5)]
+                acts = []
+                for a in ob.findall("action"):
+                    for fr in a.findall("frame"):
+                        try:
+                            acts.append({"name": a.findtext("actionname"), "start": int(fr.findtext("start")) / fps, "end": int(fr.findtext("end")) / fps})
+                        except Exception:
+                            pass
+                d["actions"][str(oid)] = acts
+            d.update({"src": "aihub171", "W": W, "H": H, "fps": fps, "note": "AI허브 171: 박스 없음. 객체별 키프레임 점 → SAM 탭 자리"})
+        else:                                                                       # KISA XML: 발생 시각·경보 구간
+            d["events"] = [{"name": e.get("kind") or "alarm", "start": e["start"], "dur": e.get("dur", 0)} for e in fire_spans(clip)]
+            d["src"] = "kisa_xml"
+        src_rel = str(xml.relative_to(G))
+    else:
+        js = under_raw(clip, ".json")
+        if js is not None and js.exists():                                          # 같은 이름 JSON(AI허브 침입·쓰러짐)
+            d["events"] = [{"name": e.get("kind") or "event", "start": e["start"], "dur": e.get("dur", 0), "note": e.get("note", "")} for e in json_spans(clip)]
+            d["src"] = "aihub_json"; src_rel = str(js.relative_to(G))
+        else:                                                                       # 폴더 단위 JSON(AI허브 71953 다각도): videos[].filename 이 이 영상인 것
+            for cand in sorted(mp4.parent.glob("*.json")):
+                try:
+                    j = json.loads(cand.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                vids = j.get("videos") if isinstance(j.get("videos"), list) else []
+                hit = next((v for v in vids if Path(str(v.get("filename", ""))).stem == stem), None)
+                if hit is None:
+                    continue
+                ann = j.get("annotations") or {}
+                view = hit.get("view") or ""
+                cap = (ann.get("caption") or {}).get(view, {}) if isinstance(ann.get("caption"), dict) else {}
+                evd = (ann.get("evidence") or {}).get(view, {}) if isinstance(ann.get("evidence"), dict) else {}
+                W = int(hit.get("width") or 0); H = int(hit.get("height") or 0)
+                ci = clip_info(clip) or {}; fps = float(ci.get("fps") or 30.0)
+                # 근거 박스: frame_id[k] 프레임의 obj_bbox[k] = [x1,y1,x2,y2] 픽셀 → 정답 박스(정규화). 키프레임 몇 장뿐이라 참조샷 재료로 쓴다
+                for k, fid in enumerate(evd.get("frame_id") or []):
+                    try:
+                        x1, y1, x2, y2 = [float(v) for v in evd["obj_bbox"][k]]
+                        oid = str(evd.get("obj_id", [])[k] if k < len(evd.get("obj_id", [])) else k + 1)
+                        if W and H:
+                            d["frames"].setdefault(tkey(int(fid) / fps), {})[oid] = [round(x1 / W, 5), round(y1 / H, 5), round((x2 - x1) / W, 5), round((y2 - y1) / H, 5)]
+                    except Exception:
+                        pass
+                m = re.search(r"(\d+)\s*~\s*(\d+)", str(evd.get("evidence_text") or ""))          # "프레임 범위 221~602" → 이벤트 구간
+                if m:
+                    d["events"].append({"name": ann.get("event_class") or "event", "start": round(int(m.group(1)) / fps, 1), "dur": round((int(m.group(2)) - int(m.group(1))) / fps, 1)})
+                d.update({"src": "aihub71953", "W": W, "H": H, "fps": fps,
+                          "meta": {"event_class": ann.get("event_class"), "view": view, "time": hit.get("time"), "date": hit.get("date"),
+                                   "cctv_angle": hit.get("cctv_angle"), "caption": cap.get("caption_text"), "cot": cap.get("cot")},
+                          "note": "AI허브 71953 다각도: 근거 키프레임 박스 몇 장 + 설명문. 나머지 프레임은 SAM 으로 만든다"})
+                src_rel = str(cand.relative_to(G)); break
+    if src_rel is None:
+        return None
+    d["src_file"] = src_rel
+    return d
+
+
+def gt_of(clip):
+    """정답라벨 저장소 읽기. 없으면 원본 정답에서 만들어(복사본) 저장소에 넣고 준다. 원본 파일은 읽기만."""
+    f = GT_DIR / (Path(clip).stem + ".json")
+    d = read_json(f, None)
+    if d is not None:
+        return d
+    d = derive_gt(clip)
+    if d is None:
+        return {"frames": {}, "points": {}, "events": [], "actions": {}}
+    try:
+        write_json(f, d)
+    except Exception:
+        pass
+    return d
 
 
 _PROP_Q = []                     # 대기 중인 job id (순서대로)
@@ -1072,26 +1062,32 @@ def _prop_worker():
             st["state"] = "done"; st["running"] = False; st["err"] = "cancelled"; continue
         st["state"] = "running"; st["running"] = True; st["started"] = _t.time()
         try:
-            frames, sec, err = sam2_propagate_objs(st["clip_full"], st["seeds"], back=st["back"], fwd=st["fwd"], step=st["step"], progress=st)
-            st["result"] = frames; st["err"] = err; st["sec"] = sec
+            frames, polys, sec, err = sam2_propagate_objs(st["clip_full"], st["seeds"], step=st["step"], progress=st,
+                                                          a=st.get("a"), b=st.get("b"), mode=st.get("mode"))
+            st["nframes"] = len(frames); st["err"] = err; st["sec"] = sec
             if frames and not err:                       # 서버가 바로 저장 → 브라우저가 떠나 있어도 결과가 남는다
-                sam2_store_write(st["clip_full"], frames, [{"t": q["t"], "obj": q.get("obj", 1), "box": q["box"]} for q in st["seeds"]])
+                sam2_store_write(st["clip_full"], frames, [{"t": q["t"], "obj": q.get("obj", 1), "box": q.get("box")} for q in st["seeds"]], polys)
                 st["saved"] = True
         except Exception as e:
             st["err"] = str(e)
         finally:
             st["running"] = False; st["state"] = "done"; st["ended"] = _t.time()
+            with _PROP_LOCK:                             # 끝난 작업은 최근 50개만 남긴다
+                done = [j for j, x in _PROP_JOBS.items() if x.get("state") == "done"]
+                for j in done[:-50]:
+                    _PROP_JOBS.pop(j, None)
 
 
-def prop_job_start(clip, seeds, back, fwd, step):
+def prop_job_start(clip, seeds, a, b, step, mode=None):
+    """전파 작업을 큐에 넣고 id 를 준다. 같은 클립이 이미 대기·진행 중이면 None(새 참조샷을 조용히 버리지 않는다)."""
     with _PROP_LOCK:
-        for jid0, st0 in _PROP_JOBS.items():      # 같은 클립이 대기·진행 중이면 그 작업을 그대로 돌려준다(중복 실행 방지)
+        for st0 in _PROP_JOBS.values():
             if st0.get("clip") == Path(clip).stem and st0.get("state") in ("queued", "running"):
-                return jid0
+                return None
         _PROP_SEQ[0] += 1
         jid = str(_PROP_SEQ[0])
-        st = _PROP_JOBS[jid] = {"id": jid, "clip": Path(clip).stem, "clip_full": clip, "seeds": seeds, "back": back, "fwd": fwd, "step": step,
-                                "done": 0, "total": 0, "running": True, "state": "queued", "result": None, "err": None, "sec": 0, "saved": False}
+        st = _PROP_JOBS[jid] = {"id": jid, "clip": Path(clip).stem, "clip_full": clip, "seeds": seeds, "a": a, "b": b, "step": step, "mode": mode,
+                                "done": 0, "total": 0, "running": True, "state": "queued", "nframes": 0, "err": None, "sec": 0, "saved": False}
         _PROP_Q.append(jid)
         if _PROP_WORKER[0] is None or not _PROP_WORKER[0].is_alive():
             _PROP_WORKER[0] = threading.Thread(target=_prop_worker, daemon=True)
@@ -1109,76 +1105,72 @@ def prop_jobs_view(stem=None):
             continue
         out.append({"id": jid, "clip": st.get("clip"), "state": st.get("state", "done" if not st.get("running") else "running"),
                     "pos": (q.index(jid) + 1) if jid in q else 0, "done": st.get("done", 0), "total": st.get("total", 0),
-                    "err": st.get("err"), "saved": st.get("saved", False), "sec": st.get("sec", 0),
-                    "nframes": len(st["result"]) if st.get("result") else 0})
+                    "err": st.get("err"), "saved": st.get("saved", False), "sec": st.get("sec", 0), "nframes": st.get("nframes", 0), "mode": st.get("mode")})
     return out
 
 
+def _sam2_file(clip):
+    return SAM2_DIR / (Path(clip).stem + ".json")
+
+
+def _sam2_load(clip):
+    d = read_json(_sam2_file(clip), {"clip": Path(clip).stem})
+    d.setdefault("frames", {}); d.setdefault("polys", {}); d.setdefault("seeds", [])
+    return d
+
+
 def sam2_store_clear(clip):
-    f = SAM2_DIR / (Path(clip).stem + ".json")
+    f = _sam2_file(clip)
     if not f.exists():
         return 0
-    d = json.loads(f.read_text(encoding="utf-8"))
-    n = len(d.get("frames") or {})
-    d["frames"] = {}; d["seeds"] = []
-    tmp = f.with_suffix(f".json.tmp{os.getpid()}")
-    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8"); tmp.replace(f)
+    d = _sam2_load(clip)
+    n = len(d["frames"])
+    d["frames"] = {}; d["polys"] = {}; d["seeds"] = []
+    write_json(f, d)
     return n
 
 
-def sam2_store_write(clip, frames, seeds):
-    """전파 결과를 자동라벨/sam2/<클립>.json 에 합친다(같은 시각은 덮어쓴다). 씨앗 프레임도 기록."""
-    SAM2_DIR.mkdir(parents=True, exist_ok=True)
-    f = SAM2_DIR / (Path(clip).stem + ".json")
-    d = {"clip": Path(clip).stem, "frames": {}, "seeds": []}
-    if f.exists():
-        try:
-            d = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    d.setdefault("frames", {}); d.setdefault("seeds", [])
-    hand = _hand_box_frames(clip)                     # 손라벨 박스가 있는 프레임은 손라벨만(SAM 결과는 버린다)
+def sam2_store_write(clip, frames, seeds, polys=None):
+    """전파 결과(박스·윤곽선)를 자동라벨/sam2/<클립>.json 에 합친다(같은 시각·같은 객체는 덮어쓴다). 참조샷도 기록.
+    손라벨 박스가 있는 프레임은 손라벨만 쓰므로 건너뛴다."""
+    d = _sam2_load(clip)
+    hand = _hand_box_frames(clip)
     for t, objs in (frames or {}).items():
-        k = f"{float(t):.1f}"; cur = d["frames"].get(k)
-        if k in hand:
+        k = tkey(t)
+        if k in hand or not isinstance(objs, dict):
             continue
-        d["frames"][k] = {**cur, **objs} if isinstance(cur, dict) and isinstance(objs, dict) else objs   # 같은 시각: 객체 단위 병합
+        d["frames"][k] = {**(d["frames"].get(k) or {}), **objs}
+        if polys and polys.get(t):
+            d["polys"][k] = {**(d["polys"].get(k) or {}), **polys[t]}
     have = {(round(float(x.get("t", 0)), 2), int(x.get("obj", 1))) for x in d["seeds"]}
     for sd in seeds or []:
         k = (round(float(sd.get("t", 0)), 2), int(sd.get("obj", 1)))
         if k not in have:
             d["seeds"].append({"t": sd.get("t"), "obj": sd.get("obj", 1), "box": sd.get("box")}); have.add(k)
     d["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    tmp = f.with_suffix(f".json.tmp{os.getpid()}")
-    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8"); tmp.replace(f)
+    write_json(_sam2_file(clip), d)
     return len(d["frames"])
 
 
 def _hand_box_frames(clip):
-    """그 클립에서 손라벨 박스(cls>=0)가 있는 프레임 키("190.5") 집합. 사람·화재 손라벨 파일 둘 다 본다."""
+    """그 클립에서 손라벨 박스(cls>=0)가 있는 프레임 키 집합. 사람·화재 손라벨 파일 둘 다 본다."""
     stem = Path(clip).stem; out = set()
-    for fn in ("person_labels.json", "fire_labels.json"):
-        fl = data_path("data/학습데이터/손라벨/" + fn, fn)
-        try:
-            rows = json.loads(fl.read_text(encoding="utf-8")) if fl.exists() else []
-        except Exception:
-            rows = []
-        for r in rows:
+    for kind in ("person", "fire"):
+        for r in read_json(label_file(kind), []):
             if Path(str(r.get("clip", ""))).stem == stem and int(r.get("cls", -1)) >= 0:
-                out.add(f"{round(float(r.get('t', 0)) * 2) / 2:.1f}")
+                out.add(tkey(r.get("t", 0)))
     return out
 
 
 def sam2_store_drop(clip, t):
-    f = SAM2_DIR / (Path(clip).stem + ".json")
+    f = _sam2_file(clip)
     if not f.exists():
         return 0
-    d = json.loads(f.read_text(encoding="utf-8"))
-    k = f"{float(t):.1f}"
-    n = 1 if k in (d.get("frames") or {}) else 0
-    d["frames"].pop(k, None)
-    tmp = f.with_suffix(f".json.tmp{os.getpid()}")
-    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8"); tmp.replace(f)
+    d = _sam2_load(clip)
+    k = tkey(t)
+    n = 1 if k in d["frames"] else 0
+    d["frames"].pop(k, None); d["polys"].pop(k, None)
+    write_json(f, d)
     return n
 
 
@@ -1260,23 +1252,27 @@ class H(BaseHTTPRequestHandler):
                 self._bytes(json.dumps({"box": None, "poly": None, "score": 0, "err": str(e)}).encode(),
                             "application/json; charset=utf-8", 500)
             return
-        if p == "/api/sam2_propagate_start":  # 전파를 백그라운드로 시작 → 작업 id. 진행률은 GET /api/sam2_progress?id=
+        if p == "/api/sam2_propagate_start":  # 전파를 큐에 넣는다 → 작업 id. 진행은 GET /api/sam2_jobs?clip= 로 본다
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 b = json.loads(self.rfile.read(n) or b"{}")
-                jid = prop_job_start(b["clip"], b.get("seeds") or [], float(b.get("back", 5)), float(b.get("fwd", 10)), float(b.get("step", 0.5)))
+                a = b.get("a"); bb = b.get("b")
+                jid = prop_job_start(b["clip"], b.get("seeds") or [], None if a is None else float(a), None if bb is None else float(bb),
+                                     float(b.get("step", 0.5)), b.get("mode") or None)
+                if jid is None:
+                    self._bytes(json.dumps({"err": "이 클립은 이미 전파 중입니다. 끝나면 다시 누르세요"}).encode(), "application/json; charset=utf-8"); return
                 self._bytes(json.dumps({"id": jid}).encode(), "application/json; charset=utf-8")
             except Exception as e:
                 self._bytes(json.dumps({"err": str(e)}).encode(), "application/json; charset=utf-8", 500)
             return
-        if p == "/api/sam2_save":             # 전파 결과 → 자동라벨/sam2 (손라벨과 별도)
+        if p == "/api/fuse_detect":          # 화재 한 프레임: Grounding DINO 불·연기 박스 → SAM2 마스크
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 b = json.loads(self.rfile.read(n) or b"{}")
-                cnt = sam2_store_write(b["clip"], b.get("frames") or {}, b.get("seeds") or [])
-                self._bytes(json.dumps({"ok": True, "frames": cnt}).encode(), "application/json; charset=utf-8")
+                objs = fuse_detect(b["clip"], float(b["t"]), float(b.get("th", 0.25)))
+                self._bytes(json.dumps({"objs": objs}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             except Exception as e:
-                self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)
+                self._bytes(json.dumps({"objs": {}, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)
             return
         if p == "/api/sam2_cancel":           # 이 클립의 대기·진행 중 전파 취소
             try:
@@ -1311,91 +1307,17 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)
             return
-        if p == "/api/sam2_propagate":       # 고른 객체 하나를 앞뒤로 전파(실험용, 저장 안 함)
-            try:
-                n = int(self.headers.get("Content-Length", 0))
-                b = json.loads(self.rfile.read(n) or b"{}")
-                if b.get("seeds") and any("obj" in sd for sd in b["seeds"]):
-                    frames, ms, err = sam2_propagate_objs(b["clip"], b["seeds"],
-                                                          back=float(b.get("back", 5)), fwd=float(b.get("fwd", 10)),
-                                                          step=float(b.get("step", 0.5)))
-                elif b.get("seeds"):
-                    frames, ms, err = sam2_propagate_multi(b["clip"], b["seeds"],
-                                                           back=float(b.get("back", 10)), fwd=float(b.get("fwd", 10)),
-                                                           step=float(b.get("step", 0.5)))
-                else:
-                    frames, ms, err = sam2_propagate(b["clip"], float(b["t"]), box=b.get("box"), point=b.get("point"),
-                                                     back=float(b.get("back", 15)), fwd=float(b.get("fwd", 15)),
-                                                     step=float(b.get("step", 0.5)))
-                self._bytes(json.dumps({"frames": frames, "sec": ms, "err": err}).encode(),
-                            "application/json; charset=utf-8")
-            except Exception as e:
-                self._bytes(json.dumps({"frames": {}, "err": str(e)}).encode(),
-                            "application/json; charset=utf-8", 500)
-            return
-        if p == "/api/autolabel_drop_obj":   # 그 위치의 객체를 클립 전체에서 제거(정지 오탐용)
-            _SAVE_LOCK.acquire()
-            try:
-                n = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(n) or b"{}")
-                stem = Path(body["clip"]).stem
-                bx = [float(v) for v in body["box"]]          # [x, y, w, h] 정규화
-                thr = float(body.get("iou", 0.5))
-
-                def hit(b):
-                    ax1, ay1, ax2, ay2 = bx[0], bx[1], bx[0] + bx[2], bx[1] + bx[3]
-                    bx1, by1, bx2, by2 = b[1], b[2], b[1] + b[3], b[2] + b[4]
-                    inter = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
-                    ua = bx[2] * bx[3] + b[3] * b[4] - inter
-                    return (inter / ua if ua > 0 else 0.0) >= thr
-
-                gone_auto = 0
-                f = AUTOLABEL_DIR / (stem + ".json")
-                if f.exists():
-                    d = json.loads(f.read_text(encoding="utf-8"))
-                    for t, arr in (d.get("frames") or {}).items():
-                        keep = [b for b in arr if not hit(b)]
-                        gone_auto += len(arr) - len(keep)
-                        d["frames"][t] = keep
-                    tmp = f.with_suffix(f".json.tmp{os.getpid()}")
-                    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
-                    tmp.replace(f); _AUTOL.pop(str(f), None)
-
-                gone_hand = 0                                  # 손라벨로 이미 병합된 자동 행도 같이 뺀다
-                fl = data_path("data/학습데이터/손라벨/person_labels.json", "person_labels.json")
-                if fl.exists():
-                    rows = json.loads(fl.read_text(encoding="utf-8"))
-                    keep = []
-                    for r in rows:
-                        if r.get("clip") == stem and hit([r.get("cls", 0), r.get("x", 0), r.get("y", 0), r.get("w", 0), r.get("h", 0)]):
-                            gone_hand += 1; continue
-                        keep.append(r)
-                    if gone_hand:
-                        _backup_labels(fl)
-                        tmp = fl.with_suffix(f".json.tmp{os.getpid()}")
-                        tmp.write_text(json.dumps(keep, ensure_ascii=False), encoding="utf-8")
-                        tmp.replace(fl)
-                self._bytes(json.dumps({"ok": True, "auto": gone_auto, "hand": gone_hand}).encode(),
-                            "application/json; charset=utf-8")
-            except Exception as e:
-                self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(),
-                            "application/json; charset=utf-8", 500)
-            finally:
-                _SAVE_LOCK.release()
-            return
-        if p == "/api/autolabel_drop":       # 자동라벨에서 그 프레임을 뺀다(검수 화면의 ×). 손라벨과 무관.
+        if p == "/api/autolabel_drop":       # DINO 자동라벨에서 그 프레임을 뺀다. 손라벨과 무관.
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n) or b"{}")
                 f = AUTOLABEL_DIR / (Path(body["clip"]).stem + ".json")
-                d = json.loads(f.read_text(encoding="utf-8"))
-                t = f"{float(body['t']):.1f}"
-                if t in (d.get("frames") or {}):
-                    d["frames"][t] = []          # 지우지 않고 '검출 없음'으로 둔다(다시 프리필되지 않게)
-                    tmp = f.with_suffix(f".json.tmp{os.getpid()}")
-                    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
-                    tmp.replace(f)
-                    _AUTOL.pop(str(f), None)
+                with _SAVE_LOCK:
+                    d = read_json(f, {"frames": {}})
+                    t = tkey(body["t"])
+                    if t in (d.get("frames") or {}):
+                        d["frames"][t] = []          # 지우지 않고 '검출 없음'으로 둔다(다시 프리필되지 않게)
+                        write_json(f, d); _AUTOL.pop(str(f), None)
                 self._bytes(json.dumps({"ok": True}).encode(), "application/json; charset=utf-8")
             except Exception as e:
                 self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(),
@@ -1406,17 +1328,15 @@ class H(BaseHTTPRequestHandler):
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n) or b"{}")
                 clip = Path(body["clip"]).stem
-                fn = "person_labels.json" if body.get("kind") == "person" else "fire_labels.json"
-                fl = data_path("data/학습데이터/손라벨/" + fn, fn)
+                fl = label_file(body.get("kind"))
                 with _SAVE_LOCK:
                     if fl.exists():                       # 초기화 직전 상태를 시각 붙여 따로 남긴다(복구용)
                         bdir = fl.parent / "_backup"; bdir.mkdir(exist_ok=True)
                         shutil.copyfile(fl, bdir / f"{fl.stem}.{time.strftime('%Y%m%d_%H%M%S')}.reset_{clip}.json")
-                    rows = json.load(open(fl, encoding="utf-8")) if fl.exists() else []
+                    rows = read_json(fl, [])
                     keep = [r for r in rows if r.get("clip") != clip]
                     removed = len(rows) - len(keep)
-                    tmp = fl.with_suffix(f".json.tmp{os.getpid()}")
-                    tmp.write_text(json.dumps(keep, ensure_ascii=False, indent=1), encoding="utf-8"); tmp.replace(fl)
+                    write_json(fl, keep)
                 sam_n = sam2_store_clear(body["clip"])
                 self._bytes(json.dumps({"ok": True, "hand_rows": removed, "sam_frames": sam_n}).encode(), "application/json; charset=utf-8")
             except Exception as e:
@@ -1427,10 +1347,9 @@ class H(BaseHTTPRequestHandler):
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n) or b"{}")
-                fn = "person_labels.json" if body.get("kind") == "person" else "fire_labels.json"
-                fl = data_path("data/학습데이터/손라벨/" + fn, fn)
+                fl = label_file(body.get("kind"))
                 _backup_labels(fl)
-                rows = json.load(open(fl, encoding="utf-8")) if fl.exists() else []
+                rows = read_json(fl, [])
                 clip = body["clip"]
                 # t 는 초. 프레임 단위로 고른 것은 소수가 된다(30fps 면 0.03 초 간격).
                 # 정수 초면 정수로 남겨 기존 라벨과 같은 모양을 유지한다.
@@ -1448,13 +1367,11 @@ class H(BaseHTTPRequestHandler):
                                  "x": round(float(x), 5), "y": round(float(y), 5),
                                  "w": round(float(w), 5), "h": round(float(h), 5),
                                  "W": W, "H": Hh, "crop": [0, 0, W, Hh]})
-                if not body.get("boxes") and body.get("kind") == "person":
-                    # 박스 0개로 저장(사람이 다 지움) = '검토했고 객체 없음' 마커. 이래야 다시 의사라벨 프리필 안 된다
+                if not body.get("boxes") and not body.get("clear"):
+                    # 박스 0개로 저장(사람이 다 지움) = '검토했고 객체 없음' 마커(사람·화재 공통). 이래야 다시 DINO 프리필 안 된다. clear=true 면 기록만 지운다(되돌리기)
                     rows.append({"file": file, "clip": clip, "src": src, "t": t, "cls": -1,
                                  "x": 0, "y": 0, "w": 0, "h": 0, "W": W, "H": Hh, "crop": [0, 0, W, Hh]})
-                tmp = fl.with_suffix(f".json.tmp{os.getpid()}")   # 다른 프로세스가 같은 임시이름을 쓰면 내용이 섞인다
-                json.dump(rows, open(tmp, "w", encoding="utf-8"), ensure_ascii=False)
-                tmp.replace(fl)
+                write_json(fl, rows)
                 try:
                     _sam2_store_drop_raw(clip, t)                 # 손라벨이 SAM 을 대신: 이 프레임의 전파 결과는 저장소에서 뺀다
                 except Exception:
@@ -1473,9 +1390,7 @@ class H(BaseHTTPRequestHandler):
         p = urllib.parse.urlparse(self.path).path
         if p in ("/", "/index.html"):
             self._stream(HERE/"dashboard.html", "text/html; charset=utf-8"); return
-        if p == "/app.js":
-            self._stream(HERE/"app.js", "application/javascript; charset=utf-8"); return
-        if p.startswith("/js/") and p.endswith(".js") and "/" not in p[4:] and ".." not in p:   # 분리된 대시보드 모듈
+        if p.startswith("/js/") and p.endswith(".js") and "/" not in p[4:] and ".." not in p:   # 대시보드 모듈(core·review·data·editor·main)
             self._stream(HERE/"js"/p[4:], "application/javascript; charset=utf-8"); return
         if p == "/api/meta":
             f = HERE/"dash_meta.json"
@@ -1485,140 +1400,43 @@ class H(BaseHTTPRequestHandler):
             self._stream(f, "application/json; charset=utf-8") if f.exists() else self.send_error(404, "dataset_meta.json 없음"); return
         if p == "/api/labels":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            fn = "person_labels.json" if (q.get("kind") or [""])[0] == "person" else "fire_labels.json"
-            f = data_path("data/학습데이터/손라벨/" + fn, fn)
+            f = label_file((q.get("kind") or [""])[0])
             self._stream(f, "application/json; charset=utf-8") if f.exists() else self._bytes(b"[]", "application/json; charset=utf-8")
+            return
+        if p == "/api/config":                # 클라이언트가 알아야 하는 서버 기본값
+            self._bytes(json.dumps({"prop_default": PROP_DEFAULT_MODE, "prop_thr": PROP_THR}).encode(), "application/json; charset=utf-8")
             return
         if p == "/api/sam2_jobs":            # 전파 작업 상태(클립별 또는 전체)
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             stem = Path((q.get("clip") or [""])[0]).stem or None
             self._bytes(json.dumps(prop_jobs_view(stem)).encode(), "application/json; charset=utf-8")
             return
-        if p == "/api/gtlabel":              # 정답라벨 저장소(클립) {frames, points, events, actions}
+        if p == "/api/gtlabel":              # 정답라벨(복사본) {frames, points, events, actions, meta}. 없으면 원본 정답에서 만든다(원본은 읽기만)
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            f = GT_DIR / (Path((q.get("clip") or [""])[0]).stem + ".json")
-            d = {"frames": {}, "points": {}, "events": [], "actions": {}}
-            if f.exists():
-                try: d = json.loads(f.read_text(encoding="utf-8"))
-                except Exception: pass
+            try:
+                d = gt_of((q.get("clip") or [""])[0])
+            except Exception as e:
+                d = {"frames": {}, "points": {}, "events": [], "actions": {}, "err": str(e)}
             self._bytes(json.dumps(d, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-            return
-        if p == "/api/gtframes":             # 정답 박스가 있는 프레임 시각 {stem: [t,...]}
-            out = {}
-            if GT_DIR.exists():
-                for fj in GT_DIR.glob("*.json"):
-                    try:
-                        fr = json.loads(fj.read_text(encoding="utf-8")).get("frames") or {}
-                        ts = sorted(float(k) for k, v in fr.items() if v)
-                        if ts:
-                            out[fj.stem] = ts
-                    except Exception:
-                        pass
-            self._bytes(json.dumps(out).encode(), "application/json; charset=utf-8")
             return
         if p == "/api/sam2frames":           # 모든 클립의 SAM 전파 프레임 시각 목록 {stem: [t,...]} (목록 배지용)
             out = {}
             if SAM2_DIR.exists():
                 for fj in SAM2_DIR.glob("*.json"):
-                    try:
-                        fr = json.loads(fj.read_text(encoding="utf-8")).get("frames") or {}
-                        ts = sorted(float(k) for k, v in fr.items() if v)
-                        if ts:
-                            out[fj.stem] = ts
-                    except Exception:
-                        pass
+                    ts = sorted(float(k) for k, v in (read_json(fj, {}).get("frames") or {}).items() if v)
+                    if ts:
+                        out[fj.stem] = ts
             self._bytes(json.dumps(out).encode(), "application/json; charset=utf-8")
             return
-        if p == "/api/sam2label":            # SAM 전파 결과 저장소(클립 전체) {frames: {t: {obj: [x,y,w,h]}}, seeds}
+        if p == "/api/sam2label":            # SAM 전파 결과 저장소(클립 전체) {frames: {t: {obj: [x,y,w,h]}}, polys: {t: {obj: 윤곽선}}, seeds}
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            f = SAM2_DIR / (Path((q.get("clip") or [""])[0]).stem + ".json")
-            d = {"frames": {}, "seeds": []}
-            if f.exists():
-                try: d = json.loads(f.read_text(encoding="utf-8"))
-                except Exception: pass
-            self._bytes(json.dumps(d, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            self._bytes(json.dumps(_sam2_load((q.get("clip") or [""])[0]), ensure_ascii=False).encode(), "application/json; charset=utf-8")
             return
         if p == "/api/autolabel":            # 미리 떠 둔 DINO 자동라벨(클립 전체)
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             d = autolabel_of((q.get("clip") or [""])[0])
             self._bytes(json.dumps(d or {"frames": {}, "missing": True}, ensure_ascii=False).encode(),
                         "application/json; charset=utf-8")
-            return
-        if p == "/api/sam2_progress":         # 전파 진행률/결과
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            st = _PROP_JOBS.get((q.get("id") or [""])[0]) or {"err": "no job", "running": False}
-            self._bytes(json.dumps(st).encode(), "application/json; charset=utf-8")
-            return
-        if p == "/api/autolabel_bg":         # 현재 프레임 앞뒤 30초를 백그라운드 DINO 로 (없는 시각만)
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            clip = (q.get("clip") or [""])[0]; t = float((q.get("t") or ["0"])[0])
-            st = bg_dino_start(clip, t) if q.get("start") else (_BG_DINO.get(clip) or {"done": 0, "total": 0, "running": False})
-            self._bytes(json.dumps(st).encode(), "application/json; charset=utf-8")
-            return
-        if p == "/api/sam2_candidates":      # 그 프레임의 후보 객체(미리 뽑은 DINO → 없으면 즉석)
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            clip = (q.get("clip") or [""])[0]; t = float((q.get("t") or ["0"])[0])
-            boxes = []; src = "none"
-            pre = autolabel_of(clip)
-            if pre:
-                fr = (pre.get("frames") or {})
-                hit = fr.get(f"{t:.1f}")
-                if hit is None:
-                    near = min(fr.keys(), key=lambda k: abs(float(k) - t), default=None)
-                    if near is not None and abs(float(near) - t) <= 0.25:
-                        hit = fr[near]
-                if hit is not None:
-                    boxes = [b[:5] for b in hit]; src = "dino_pre"
-            if not boxes:
-                try:
-                    boxes = gdino_boxes(clip, t, 0.25); src = "dino_live"
-                except Exception as e:
-                    src = "err:" + str(e)
-            self._bytes(json.dumps({"boxes": boxes, "src": src}).encode(), "application/json; charset=utf-8")
-            return
-        if p == "/api/sam2":                 # 점 하나 → SAM2 마스크의 타이트 박스
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            try:
-                box, poly, sc = sam2_box((q.get("clip") or [""])[0], float((q.get("t") or ["0"])[0]),
-                                         float((q.get("x") or ["0"])[0]), float((q.get("y") or ["0"])[0]))
-                self._bytes(json.dumps({"box": box, "poly": poly, "score": round(sc, 3)}).encode(),
-                            "application/json; charset=utf-8")
-            except Exception as e:
-                self._bytes(json.dumps({"box": None, "poly": None, "score": 0, "err": str(e)}).encode(),
-                            "application/json; charset=utf-8")
-            return
-        if p == "/api/pseudolabel":
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            clip = (q.get("clip") or [""])[0]; t = float((q.get("t") or ["0"])[0])
-            which = (q.get("model") or ["auto"])[0]   # auto=미리뽑은DINO→없으면person_v3 · gdino=지금 추론 · person=person_v3
-            err = None; used = which
-            try:
-                if which == "gdino":
-                    boxes = gdino_boxes(clip, t, float((q.get("th") or ["0.30"])[0]))
-                else:
-                    boxes = None
-                    if which != "person":
-                        pre = autolabel_of(clip)          # 배치로 미리 뽑아 둔 DINO 결과(파일 읽기라 즉시)
-                        if pre:
-                            fr = pre.get("frames") or {}
-                            hit = fr.get(f"{float(t):.1f}")
-                            if hit is None:               # 0.5초 격자에서 살짝 어긋난 요청도 가장 가까운 것으로
-                                near = min(fr.keys(), key=lambda k: abs(float(k) - float(t)), default=None)
-                                if near is not None and abs(float(near) - float(t)) <= 0.25:
-                                    hit = fr[near]
-                            if hit is not None:
-                                boxes = [b[:5] for b in hit]      # [cls,x,y,w,h] 만 (뒤의 점수는 뺀다)
-                                used = "dino_pre"
-                    if boxes is None:
-                        boxes = person_boxes(clip, t); used = "person_v3"
-            except Exception as e:
-                boxes = []; err = str(e)
-            self._bytes(json.dumps({"boxes": boxes, "model": used, "err": err}).encode(),
-                        "application/json; charset=utf-8")
-            return
-        if p == "/api/labelmeta":
-            f = data_path("data/학습데이터/손라벨/full/meta.json", "labelfull/meta.json")
-            self._stream(f, "application/json; charset=utf-8") if f.exists() else self.send_error(404)
             return
         if p == "/api/sources":
             self._bytes(json.dumps(sources(), ensure_ascii=False).encode(),
@@ -1674,10 +1492,6 @@ class H(BaseHTTPRequestHandler):
             if data is None:
                 self.send_error(404, "frame not found"); return
             self._bytes(data, "image/jpeg"); return
-        if p == "/api/newframes":
-            f = data_path("data/학습데이터/손라벨/new/meta.json", "labelfull_new/meta.json")
-            self._stream(f, "application/json; charset=utf-8") if f.exists() else self.send_error(404)
-            return
         m = re.match(r"/dsimg/(.+)$", p)
         if m:
             ip = G/urllib.parse.unquote(m.group(1))
@@ -1705,27 +1519,6 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._bytes(json.dumps(q, ensure_ascii=False).encode(), "application/json; charset=utf-8"); return
-        if p == "/api/clipstat":                 # 데이터확인 요약: 총수 + 표본(목록에 보이는 이미지) 라벨률·클래스 분포
-            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            got = raw_items((qs.get("src") or [""])[0], 600)
-            if got is None:
-                self.send_error(404, "category not found"); return
-            lab = 0; cls = {}; boxes = 0
-            for rel in got["images"]:
-                lp = (G / rel).with_suffix(".txt")            # 1) 이미지 옆 YOLO txt (산불 frames 등)
-                if not lp.is_file():
-                    lp = raw_sibling_label(rel)                # 2) 다른 트리(labels/) 에 있는 경우
-                if lp is None or not lp.is_file():
-                    continue
-                lab += 1
-                for ln in lp.read_text(errors="ignore").splitlines():
-                    ps = ln.split()
-                    if len(ps) >= 5:
-                        cls[ps[0]] = cls.get(ps[0], 0) + 1; boxes += 1
-            note = RAW_CLASS_NOTE.get(got["cat"], "")
-            self._bytes(json.dumps({"cat": got["cat"], "img_total": got["img_total"], "vid_total": got["vid_total"],
-                                    "sample": len(got["images"]), "labeled": lab, "boxes": boxes, "classes": cls,
-                                    "note": note}, ensure_ascii=False).encode(), "application/json; charset=utf-8"); return
         if p == "/api/results":
             out = []
             rdir = G / "results"
@@ -1805,12 +1598,6 @@ class H(BaseHTTPRequestHandler):
             vp = G/urllib.parse.unquote(m.group(1))
             if vp.exists() and WS in vp.resolve().parents: self._stream(vp, "video/mp4")
             else: self.send_error(404, "video not found")
-            return
-        m = re.match(r"/newframe/(.+\.png)$", p)
-        if m:
-            fp = data_path("data/학습데이터/손라벨/new", "labelfull_new")/urllib.parse.unquote(m.group(1))
-            if fp.exists(): self._stream(fp, "image/png")
-            else: self.send_error(404)
             return
         m = re.match(r"/frame/(.+\.png)$", p)
         if m:
