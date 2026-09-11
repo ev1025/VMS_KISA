@@ -215,15 +215,26 @@ async function openFrameAt(clip, sec, mode) {
     // 화면을 지우지 않는다. 새 그림을 다 받은 뒤 바꿔 끼우면 사라졌다 나타나는 깜빡임이 없다.
     const n = ++loadSeq;
     const pre = new Image();
-    pre.onload = pre.onerror = () => { if (n !== loadSeq) return; ED.applyFrame(sec, url, existingBoxes(stemOf(clip), sec)); afterShow(); };   // 손라벨은 그림을 받은 뒤 다시 읽는다(그사이 저장됐을 수 있다)
+    pre.onload = pre.onerror = () => { if (n !== loadSeq) return; ED.applyFrame(sec, url, existingBoxes(stemOf(clip), sec)); afterShow(); preloadNear(clip, sec, last); };   // 손라벨은 그림을 받은 뒤 다시 읽는다(그사이 저장됐을 수 있다)
     pre.src = url;
     return;
   }
   loadSeq++;
   setTimeout(afterShow, 0);            // 편집기를 새로 만든 경우
   renderEditor({ clip, stem: stemOf(clip), src: clip + ".mp4", t: sec, last, W: ci.W, H: ci.H, url, saved });
+  preloadNear(clip, sec, last);
 }
 
+const _PRE = new Map();               // 미리 받아 둔 프레임 그림(url → Image). 최근 60장만
+function preloadNear(clip, sec, last) {   // 편집기에서 앞뒤 2칸을 미리 받아 두면 화살표 이동이 검수 확대창처럼 바로 바뀐다
+  [1, -1, 2, -2].forEach(k => {
+    const t = quant(sec + k * _step()); if (t < 0 || t > last) return;
+    const u = `/frameat?clip=${encodeURIComponent(clip)}&t=${t}`;
+    if (_PRE.has(u)) return;
+    const g = new Image(); g.src = u; _PRE.set(u, g);
+    if (_PRE.size > 60) _PRE.delete(_PRE.keys().next().value);
+  });
+}
 function rectSvg(x, y, w, h, color, dash, fill) {
   return `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill ? color + fill : 'none'}" stroke="${color}" stroke-width="3" ${dash ? 'stroke-dasharray="8 5"' : ''}/>`;
 }
@@ -350,10 +361,8 @@ function renderEditor(f) {
   let drawRef = () => {};      // 아래에서 draw 로 채운다(선언 순서 때문에 참조로 둔다)
   const fillShots = () => (persistSam(f.clip), drawTrack(bar.tk, f), updateTStat(), renderShotRow(shots, f, {
     onDeleted: (sec, prev) => {                       // 미리보기 × 로 프레임 라벨을 지움 → [규칙 1] 그 프레임의 참조샷도 전부 지운다. 이력에 남기고 되돌리기 버튼
-      if (sec === f.t) { LB.boxes = []; f.saved = []; LB.src = "none"; }
-      SM.seeds = SM.seeds.filter(q => !near(q.t, sec));   // 정답 참조 포함(프레임을 지운 건 사용자의 판단)
       if (prev && prev.length) { hist.push({ t: sec, boxes: JSON.stringify(prev), sam: null }); redo.length = 0; }
-      fillShots(); loadSam(); showUndo(sec, prev);      // loadSam = 참조샷 기준으로 점·마스크 다시 잡기(없으니 비워짐) + 객체 줄 다시 그림
+      frameDeleted(sec); showUndo(sec, prev);
     },
   }));
   let undoTimer = null;
@@ -629,7 +638,6 @@ function renderEditor(f) {
         const sam = Object.entries(SAMMAP[f.clip] || {}).filter(([k, v]) => v && v[String(o)]).map(([k]) => +k);
         const seedAt = t => SM.seeds.find(sd => sd.obj === o && near(sd.t, t));
         const all = [...new Set([...hand, ...sam, ...SM.seeds.filter(sd => sd.obj === o).map(sd => sd.t)])].sort((x, y) => x - y);
-        if (!all.length) { const none = el("span", null, "라벨 없음"); none.style.cssText = "font-size:11px;color:var(--mut)"; row.appendChild(none); }
         all.forEach(t => {
           const sd = seedAt(t);
           const chip = el("span"); chip.style.cssText = `display:inline-flex;align-items:center;gap:5px;background:var(--panel2);border:1px solid ${sd ? samCol(o) : "var(--line)"};border-radius:14px;padding:1px 6px 1px 8px;font-size:11px;font-weight:700${near(t, f.t) ? ";outline:2px solid var(--blue)" : ""}`;
@@ -811,6 +819,11 @@ function renderEditor(f) {
     SM.seeds = SM.seeds.filter(q => { if (q.fromGT) return true; const hb = near(q.t, f.t) ? LB.boxes : existingBoxes(f.stem, q.t); return !!hb && hb.some(b => iou4(box4(b), q.box) > 0.3); });
     if (SM.seeds.length !== n0) persistSam(f.clip);
   };
+  const frameDeleted = t => {                        // [규칙 1] 프레임 라벨이 지워짐(어느 경로든): 그 프레임 참조샷 전부 제거, 보는 프레임이면 박스·점·마스크 비움
+    SM.seeds = SM.seeds.filter(q => !near(q.t, t));
+    if (near(f.t, t)) { LB.boxes = []; f.saved = []; LB.src = "none"; sel = null; }
+    loadSam(); fillShots(); draw();
+  };
   const loadSam = () => {
     pruneSeeds(); const sd = SM.seeds.find(q => near(q.t, f.t) && q.obj === SM.cur); SP = sd && sd.pts ? sd.pts.slice() : []; SMASK = sd ? { box: sd.box, poly: sd.poly } : null; drawObjs(); draw(); };
 
@@ -945,7 +958,7 @@ function renderEditor(f) {
 
   // ---------- 편집기 핸들: 같은 클립의 다른 초로 넘어갈 때는 applyFrame 만 부른다(DOM 을 다시 만들지 않는다) ----------
   ED = {
-    clip: f.clip, mode: LB.mode, _tok: MY, loadSam, fillShots, watch: () => watchJob(),
+    clip: f.clip, mode: LB.mode, _tok: MY, loadSam, fillShots, frameDeleted, watch: () => watchJob(),
     keydown: document.onkeydown, keyup: document.onkeyup,   // 같은 클립 재진입(ED 재사용) 때 다시 걸기 위해 보관
     setPseudo: (sec, boxes, src) => {                 // 늦게 도착한 의사라벨을 얹는다. 이미 화면에 박스가 있거나 손라벨로 확정된 프레임이면 무시
       if (LB.sec !== sec || LB.boxes.length || hasHand(f.saved) || LB.src === "hand") return;
@@ -1022,7 +1035,7 @@ async function openAutoReview(f) {
       if (d.src !== "none") {
         const x = el("button", null, "×"); x.title = d.src === "hand" ? "이 프레임 손라벨 삭제(빈 라벨로 남음)" : "이 프레임의 SAM 결과 제외";
         x.style.cssText = "position:absolute;top:6px;right:6px;width:24px;height:24px;padding:0;border-radius:50%;border:none;background:#000b;color:#fff;font-size:15px;line-height:1;cursor:pointer";
-        x.onclick = async ev => { ev.stopPropagation(); x.textContent = "…"; try { if (d.src === "hand") await postLabel(f.stem, d.t, f.W, f.H, [], f.src); else await dropSam(f.clip, d.t); d.boxes = []; d.src = "none"; cell.style.opacity = "0.35"; holder.style.filter = "grayscale(1)"; x.remove(); if (ED && ED.fillShots) ED.fillShots(); } catch (e) { x.textContent = "×"; } };
+        x.onclick = async ev => { ev.stopPropagation(); x.textContent = "…"; try { if (d.src === "hand") await postLabel(f.stem, d.t, f.W, f.H, [], f.src); else await dropSam(f.clip, d.t); d.boxes = []; d.src = "none"; cell.style.opacity = "0.35"; holder.style.filter = "grayscale(1)"; x.remove(); if (ED && ED.clip === f.clip && ED.frameDeleted) ED.frameDeleted(d.t); else if (ED && ED.fillShots) ED.fillShots(); } catch (e) { x.textContent = "×"; } };
         cell.appendChild(x);
       }
       cell.appendChild(holder); cell.appendChild(cap); grid.appendChild(cell);
@@ -1074,7 +1087,7 @@ function openShot(f, items, idx) {
     if (g.complete && g.naturalWidth) apply(); else { g.onload = apply; g.onerror = apply; }   // 이미지가 준비된 뒤 박스와 함께 바꾼다
     [1, 2, -1, -2].forEach(k => { const q = items[idx + k]; if (q) preload(q.t); });        // 앞뒤 프레임 미리 받기
   };
-  const syncEditor = (t, bx) => { if (ED && ED.clip === f.clip) { if (near(LB.sec, t)) { LB.boxes = bx.map(b => b.slice()); LB.src = bx.length ? "hand" : "none"; } ED.syncSam(); ED.fillShots(); ED.loadSam(); } };
+  const syncEditor = (t, bx) => { if (ED && ED.clip === f.clip && !bx.length && ED.frameDeleted) { ED.frameDeleted(t); return; } if (ED && ED.clip === f.clip) { if (near(LB.sec, t)) { LB.boxes = bx.map(b => b.slice()); LB.src = bx.length ? "hand" : "none"; } ED.syncSam(); ED.fillShots(); ED.loadSam(); } };
   const save = async () => {                           // 고친 프레임 = 손라벨로 승격(전 박스 저장). SAM 저장소에서는 서버가 뺀다
     const d = cur(); if (busy) return; busy = true; cap.textContent = "저장 중…";
     try {

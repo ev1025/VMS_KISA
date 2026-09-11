@@ -26,6 +26,7 @@ kisa_연구개발_방화영상: { mode: fire,   media: video, gt: kisa_xml, use:
 kisa_연구개발_사람영상: { mode: person, media: video, gt: kisa_xml, use: train, note: "침입·배회·쓰러짐 825편. Alarm 시각만" }
 open_azimjaan_fire:     { mode: fire,   media: image, gt: yolo_txt, classes: { 0: drop, 1: 0, 2: 1 }, use: train, note: "원본 0=구름(버림) 1=불 2=연기" }
 open_datacluster_fire:  { mode: fire,   media: image, gt: voc_xml, classes: { fire: 0, smoke: 1 }, use: train, note: "VOC xml, Annotations/ 트리" }
+open_coco:              { mode: person, media: image, gt: yolo_txt, classes: { 0: 0 }, use: train, note: "COCO 2017 train(118k). person(0)만 쓰고 나머지 79 클래스는 drop. 이미지 coco/images/train2017 · 라벨 coco/labels/train2017(ultralytics 변환). 이미지 CC-BY 4.0" }
 open_dfire:             { mode: fire,   media: image, gt: yolo_txt, classes: { 0: 1, 1: 0 }, use: train, note: "원본 0=smoke 1=fire → 뒤집는다" }
 open_fasdd:             { mode: fire,   media: image, gt: coco_json, classes: { fire: 0, smoke: 1 }, use: train, note: "annotations/<split>.json (COCO)" }
 open_flir:              { mode: person, media: image, gt: coco_json, use: none, note: "FLIR ADAS v2, 라이선스 불명 → 학습 사용 안 함" }
