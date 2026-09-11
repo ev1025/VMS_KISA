@@ -222,10 +222,10 @@ def run_one(exp, defaults):
             n_lines = sum(1 for _ in open(EXP_DIR / name / "train.txt", encoding="utf-8")) if (EXP_DIR / name / "train.txt").is_file() else 0
             if cache == "ram" and n_lines > int(defaults.get("ram_cache_max", 60000)):
                 cache = False
-            log(f"{name} 이어서 학습(last.pt, {n_lines}장, cache={cache}, workers={a_.get('workers', 8)})")
+            log(f"{name} 이어서 학습(last.pt, {n_lines}장, cache={cache}, workers={a_.get('workers', 8)}, batch={a_.get('batch', 128)})")
             LOG_DIR.mkdir(parents=True, exist_ok=True)
             with open(LOG_DIR / f"{name}.log", "a", encoding="utf-8") as lf:
-                rc = subprocess.run([str(PY), str(V / "scripts/resume_train.py"), str(last_pt), "--cache", str(cache), "--workers", str(a_.get("workers", 8))],
+                rc = subprocess.run([str(PY), str(V / "scripts/resume_train.py"), str(last_pt), "--cache", str(cache), "--workers", str(a_.get("workers", 8)), "--batch", str(a_.get("batch", 128))],
                                     cwd=V, stdout=lf, stderr=subprocess.STDOUT, preexec_fn=_pdeathsig, env=dict(os.environ, CUDA_VISIBLE_DEVICES="0")).returncode
             pt = best_pt(exp)
             if rc != 0 or pt is None:

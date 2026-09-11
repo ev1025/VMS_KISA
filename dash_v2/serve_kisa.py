@@ -3,7 +3,7 @@
 
 라벨 저장소 셋(표시·학습 우선순위 순):
   손라벨   data/학습데이터/손라벨/{person,fire}_labels.json   /api/savelabel · /api/labels · /api/clearlabels
-  SAM 전파 data/학습데이터/자동라벨/sam2/<stem>.json         /api/sam2_propagate_start(큐) · sam2_jobs · sam2_cancel · sam2_label · sam2_drop · sam2_clear · sam2frames
+  SAM 전파 data/학습데이터/자동라벨/sam2/<stem>.json         /api/sam2_propagate_start(큐) · sam2_jobs · sam2_cancel · sam2_label · sam2_drop · sam2_drop_obj · sam2_clear · sam2frames
   DINO     data/학습데이터/자동라벨/dino/<stem>.json         /api/autolabel · autolabel_drop (배치 스크립트가 만든다. 첫 등장 프레임 찾기·초안용)
   정답     data/학습데이터/정답라벨/<stem>.json               /api/gtlabel (읽기 전용)
 손라벨 박스가 있는 프레임은 SAM 저장소에서 빠진다(savelabel 이 빼고, 전파 저장이 건너뛴다).
@@ -749,16 +749,20 @@ def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None
                 return a0 + (a1 - a0) * w
         return prof[-1][1]
 
+    drops = {"lost": 0, "empty": 0, "size": 0}          # 건너뛴 사유별 수. 작업 상태(progress)에 실어 편집기가 보인다
+    if progress is not None:
+        progress["drops"] = drops
+
     def take(gi, oid, arr, prof):
         """한 프레임·한 객체의 이진 마스크 → 박스·윤곽선 기록. 참조 박스 넓이 대비 3배/1/3 밖이면 흘러간 것으로 버린다."""
         bb = _mask_bbox(arr)
         if bb is None:
-            return
+            drops["empty"] += 1; return
         x1, y1, x2, y2 = bb
         area = (x2 - x1) * (y2 - y1)
         sa = area_at(prof, times[gi]) or area
         if area > 0.5 * W * H or area > 3.0 * sa or area < sa / 3.0:
-            return
+            drops["size"] += 1; return
         k = f"{times[gi]:.1f}"
         out.setdefault(k, {})[str(oid)] = [round(x1 / W, 5), round(y1 / H, 5), round((x2 - x1) / W, 5), round((y2 - y1) / H, 5)]
         polys.setdefault(k, {})[str(oid)] = _poly_of(arr, W, H)
@@ -778,7 +782,7 @@ def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None
         res = {}
         for j, oid in enumerate(oids):
             if sc is not None and sc.numel() > j and float(sc.detach().flatten()[j]) <= 0:   # 대상 없음(가림·이탈)
-                continue
+                drops["lost"] += 1; continue
             one = pm[:, j:j + 1] if pm.shape[1] > j else pm
             m = proc.post_process_masks(one, [(H, W)], binarize=True, mask_threshold=thr.get(oid, 0.0))[0]
             arr = np.asarray(m.numpy() if hasattr(m, "numpy") else m)
@@ -1137,7 +1141,8 @@ def prop_jobs_view(stem=None):
             continue
         out.append({"id": jid, "clip": st.get("clip"), "state": st.get("state", "done" if not st.get("running") else "running"),
                     "pos": (q.index(jid) + 1) if jid in q else 0, "done": st.get("done", 0), "total": st.get("total", 0),
-                    "err": st.get("err"), "saved": st.get("saved", False), "sec": st.get("sec", 0), "nframes": st.get("nframes", 0), "mode": st.get("mode")})
+                    "err": st.get("err"), "saved": st.get("saved", False), "sec": st.get("sec", 0), "nframes": st.get("nframes", 0), "mode": st.get("mode"),
+                    "drops": st.get("drops") or {}})
     return out
 
 
@@ -1206,6 +1211,24 @@ def sam2_store_drop(clip, t):
     return n
 
 
+def sam2_store_drop_obj(clip, obj):
+    """한 객체의 전파 결과·참조샷을 저장소 전 프레임에서 뺀다. 그 객체만 있던 프레임은 프레임째 사라진다."""
+    f = _sam2_file(clip)
+    if not f.exists():
+        return 0
+    d = _sam2_load(clip); o = str(obj); n = 0
+    for key in ("frames", "polys"):
+        m = d[key]
+        for k in list(m):
+            if o in (m[k] or {}):
+                m[k].pop(o); n += (key == "frames")
+            if not m[k]:
+                m.pop(k)
+    d["seeds"] = [q for q in d["seeds"] if str(q.get("obj")) != o]
+    write_json(f, d)
+    return n
+
+
 def _locked_store(fn):
     """sam2 저장소는 read-modify-write. 전파 워커·검수 ×·일괄 삭제가 겹쳐도 한쪽이 사라지지 않게 savelabel 과 같은 락을 쓴다."""
     def w(*a, **k):
@@ -1218,6 +1241,7 @@ def _locked_store(fn):
 sam2_store_write = _locked_store(sam2_store_write)
 _sam2_store_drop_raw = sam2_store_drop            # savelabel 은 이미 _SAVE_LOCK 안 → 락 없는 원본으로
 sam2_store_drop = _locked_store(sam2_store_drop)
+sam2_store_drop_obj = _locked_store(sam2_store_drop_obj)
 sam2_store_clear = _locked_store(sam2_store_clear)
 
 
@@ -1346,6 +1370,15 @@ class H(BaseHTTPRequestHandler):
                 n = int(self.headers.get("Content-Length", 0))
                 b = json.loads(self.rfile.read(n) or b"{}")
                 cnt = sam2_store_drop(b["clip"], float(b["t"]))
+                self._bytes(json.dumps({"ok": True, "dropped": cnt}).encode(), "application/json; charset=utf-8")
+            except Exception as e:
+                self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)
+            return
+        if p == "/api/sam2_drop_obj":         # 객체 삭제: 그 객체를 sam2 저장소 전 프레임에서 뺀다
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                b = json.loads(self.rfile.read(n) or b"{}")
+                cnt = sam2_store_drop_obj(b["clip"], int(b["obj"]))
                 self._bytes(json.dumps({"ok": True, "dropped": cnt}).encode(), "application/json; charset=utf-8")
             except Exception as e:
                 self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)

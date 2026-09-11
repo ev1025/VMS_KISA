@@ -99,7 +99,9 @@ async function renderRawList(cat) {
   }
   if (r.images.length) {
     r.images.forEach(rel => {
-      const it = el("div", "item");
+      const it = el("div", "item"); it.dataset.rel = rel;   // 강조·배지가 영상과 같은 규칙으로 찾을 수 있게
+      const _in = labeledCount("img:" + rel);                // 손라벨 있으면 개수 배지(영상과 같은 모양)
+      if (_in) { const _ib = el("span", null, String(_in)); _ib.style.cssText = BADGE_CSS; it.appendChild(_ib); }
       const nm = el("span", "nm", rel.split("/").pop()); nm.title = rel; nm.style.userSelect = "text"; nm.style.cursor = "text";
       it.appendChild(nm);
       it.onclick = () => { if (window.getSelection && String(window.getSelection())) return; openImage(rel); };
@@ -111,7 +113,7 @@ async function renderRawList(cat) {
     r.videos.forEach(rel => {
       const it = el("div", "item"); it.dataset.rel = rel;
       const _vn = labeledCount(rel.split("/").pop().replace(/\.mp4$/, ""));   // 손라벨 있으면 개수 뱃지
-      if (_vn) { const _vb = el("span", null, String(_vn)); _vb.style.cssText = "flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:18px;padding:0 6px;border-radius:6px;font:700 11px/1 ui-monospace,Menlo,monospace;color:#cfe4ff;background:#58a6ff22;border:1px solid #58a6ff55;margin-right:6px"; it.appendChild(_vb); }
+      if (_vn) { const _vb = el("span", null, String(_vn)); _vb.style.cssText = BADGE_CSS; it.appendChild(_vb); }
       const nm = el("span", "nm", rel.split("/").pop()); nm.title = rel; nm.style.userSelect = "text"; nm.style.cursor = "text";
       it.appendChild(nm);
       it.onclick = () => { if (window.getSelection && String(window.getSelection())) return; openClip(rel); };
@@ -177,6 +179,7 @@ async function showRawImage(rel) {
 // 이미지 항목 열기: 라벨 모드가 '편집 안 함'이 아니면 편집기(기본), 아니면 보기
 function openImage(rel) {
   saveSession({ img: rel, rel: null });
+  markListItem(rel);                                    // 지금 보는 이미지 표시(영상과 같은 규칙)
   if (catMode(rel) !== "none") openImageEdit(rel); else showRawImage(rel);
 }
 // 이미지 우측 패널: 정보(파일·경로·정답 수) → 라벨 편집/사진 보기 → 라벨 모드
@@ -230,13 +233,19 @@ function catModeRow(rel, onApply) {
   row.appendChild(lab); row.appendChild(sel); row.appendChild(ap);
   return row;
 }
-// 목록 배지(학습데이터 프레임 수) 한 항목만 다시 그린다 — 전파·삭제 직후
-function updateRawBadge(stem) {
+const BADGE_CSS = "flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:18px;padding:0 6px;border-radius:6px;font:700 11px/1 ui-monospace,Menlo,monospace;color:#cfe4ff;background:#58a6ff22;border:1px solid #58a6ff55;margin-right:6px";   // 목록 배지(영상·이미지 공통)
+const labelKeyOf = rel => /\.mp4$/i.test(rel) ? rel.split("/").pop().replace(/\.mp4$/, "") : "img:" + rel;   // 목록 항목 → 라벨 저장소 키(영상=stem · 이미지=img:<rel>)
+// 지금 보는 항목을 목록에서 강조(영상·이미지 공통)
+function markListItem(rel) {
+  document.querySelectorAll("#list .item").forEach(e => { const on = e.dataset.rel === rel; e.classList.toggle("on", on); if (on) e.scrollIntoView({ block: "nearest" }); });
+}
+// 목록 배지(학습데이터 프레임 수) 한 항목만 다시 그린다 — 전파·삭제 직후. key = 영상 stem 또는 img:<rel>
+function updateRawBadge(key) {
   document.querySelectorAll("#list .item").forEach(it => {
-    if (!it.dataset.rel || it.dataset.rel.split("/").pop().replace(/\.mp4$/, "") !== stem) return;
+    if (!it.dataset.rel || labelKeyOf(it.dataset.rel) !== key) return;
     const old = it.querySelector(":scope > span:not(.nm)"); if (old) old.remove();
-    const n = labeledCount(stem);
-    if (n) { const b = el("span", null, String(n)); b.style.cssText = "flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:18px;padding:0 6px;border-radius:6px;font:700 11px/1 ui-monospace,Menlo,monospace;color:#cfe4ff;background:#58a6ff22;border:1px solid #58a6ff55;margin-right:6px"; it.insertBefore(b, it.firstChild); }
+    const n = labeledCount(key);
+    if (n) { const b = el("span", null, String(n)); b.style.cssText = BADGE_CSS; it.insertBefore(b, it.firstChild); }
   });
 }
 // 좌측 영상 클릭: 편집 중이면 그 영상 편집 유지, 아니면 재생
@@ -253,7 +262,7 @@ async function showRawVideo(rel) {
   let events = [], dur = 0, ci = null;
   try { ci = await (await fetch("/api/clipinfo?clip=" + encodeURIComponent(clip))).json(); dur = ci.dur || 0; events = ci.fire || []; } catch (e) {}
   if (_my !== _SRV_SEQ) return;
-  document.querySelectorAll("#list .item").forEach(e => { const on = e.dataset.rel === rel; e.classList.toggle("on", on); if (on) e.scrollIntoView({ block: "nearest" }); });   // 지금 보는 영상 표시
+  markListItem(rel);                                    // 지금 보는 영상 표시
   const first = events[0] || {};
   document.onkeydown = null;
   const _mode0 = catMode(rel);

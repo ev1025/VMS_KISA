@@ -53,6 +53,7 @@ function shotKinds(clip) {
 }
 let SAMFR = {};    // stem → SAM 전파 프레임 시각 목록(/api/sam2frames). 목록 배지 = 손라벨 ∪ SAM = 학습데이터 수
 function labeledCount(clip) {
+  if (clip.startsWith("img:")) return (IMGLABELS || []).some(r => r.clip === clip && r.cls >= 0) ? 1 : 0;   // 이미지 = 프레임 하나
   const by = {};   // fire(LABELS)·person(PLABELS) 어느 쪽 손라벨이든 그 클립의 프레임 수를 센다(0.5초 격자)
   for (const S of [LABELS, PLABELS]) { if (S) S.filter(r => r.clip === clip && r.cls >= 0).forEach(r => { by[Math.round(r.t * 2) / 2] = 1; }); }
   (SAMFR[clip] || []).forEach(t => { by[Math.round(t * 2) / 2] = 1; });
@@ -348,10 +349,11 @@ function renderEditor(f) {
   };
   let drawRef = () => {};      // 아래에서 draw 로 채운다(선언 순서 때문에 참조로 둔다)
   const fillShots = () => (persistSam(f.clip), drawTrack(bar.tk, f), updateTStat(), renderShotRow(shots, f, {
-    onDeleted: (sec, prev) => {                       // 미리보기 × 로 손라벨을 지움 → 이력에 남기고 되돌리기 버튼
+    onDeleted: (sec, prev) => {                       // 미리보기 × 로 프레임 라벨을 지움 → [규칙 1] 그 프레임의 참조샷도 전부 지운다. 이력에 남기고 되돌리기 버튼
       if (sec === f.t) { LB.boxes = []; f.saved = []; LB.src = "none"; }
+      SM.seeds = SM.seeds.filter(q => !near(q.t, sec));   // 정답 참조 포함(프레임을 지운 건 사용자의 판단)
       if (prev && prev.length) { hist.push({ t: sec, boxes: JSON.stringify(prev), sam: null }); redo.length = 0; }
-      fillShots(); drawRef(); showUndo(sec, prev);
+      fillShots(); loadSam(); showUndo(sec, prev);      // loadSam = 참조샷 기준으로 점·마스크 다시 잡기(없으니 비워짐) + 객체 줄 다시 그림
     },
   }));
   let undoTimer = null;
@@ -408,7 +410,7 @@ function renderEditor(f) {
       await postLabel(f.stem, f.t, f.W, f.H, LB.boxes, f.src);
       f.saved = LB.boxes.map(b => b.slice()); LB.src = "hand";
       if ((SAMMAP[f.clip] || {})[tkey(f.t)]) { samForget(f.clip, f.t); SM.propFrames = SAMFR[f.stem].map(tkey); }   // 손라벨이 SAM 을 대신(서버 저장소는 savelabel 이 뺐다)
-      fillShots(); saveState = ""; draw();
+      fillShots(); saveState = ""; draw(); if (typeof updateRawBadge === "function") updateRawBadge(f.stem);   // 목록 배지(영상·이미지 공통)
     } catch (e) { saveState = "저장 실패"; draw(); }
   };
 
@@ -513,12 +515,12 @@ function renderEditor(f) {
   };
   const finish = ev => {
     if (pan) { pan = null; ov.style.cursor = _space ? "grab" : "crosshair"; return; }   // 이동 끝
-    if (rz) { const i = rz.i; rz = null; _resized = true; seedFromBox(i); sel = null; draw(); saveNow(); return; }   // 크기조절 끝 → 참조샷 갱신 후 저장
-    if (mv) { const i = mv.i; mv = null; seedFromBox(i); sel = null; draw(); saveNow(); return; }                    // 이동 끝 → 참조샷 따라가고 저장
+    if (rz) { const i = rz.i; rz = null; _resized = true; seedFromBox(i, false); sel = null; draw(); saveNow(); return; }   // 크기조절 끝 → (참조샷이 있으면) 따라가고 저장
+    if (mv) { const i = mv.i; mv = null; seedFromBox(i, false); sel = null; draw(); saveNow(); return; }                    // 이동 끝 → (참조샷이 있으면) 따라가고 저장
     sd = null;
     if (!st) return; const p = toImg(ev);
     const x = Math.min(st.x, p.x), y = Math.min(st.y, p.y), w = Math.abs(p.x - st.x), h = Math.abs(p.y - st.y); st = null;
-    if (w > 4 && h > 4) { snap(); LB.boxes.push([curCls, x / f.W, y / f.H, w / f.W, h / f.H]); seedFromBox(LB.boxes.length - 1); }   // 그린 박스 = 현재 객체 참조샷
+    if (w > 4 && h > 4) { snap(); LB.boxes.push([curCls, x / f.W, y / f.H, w / f.W, h / f.H]); seedFromBox(LB.boxes.length - 1, true); }   // 새로 그린 박스 = 현재 객체 참조샷
     draw(); saveNow();
   };
   ov.onmouseup = finish;
@@ -549,13 +551,13 @@ function renderEditor(f) {
     LB.boxes = keepIdx.map(i => LB.boxes[i]);
     LB.src = "hand";
   };
-  const seedFromBox = i => {                         // 박스를 그리거나 옮기거나 줄임 → 그 박스를 쓰는 객체의 참조샷 갱신(없으면 현재 객체 것으로)
-    const b = LB.boxes[i]; if (!b) return;
+  const seedFromBox = (i, create) => {               // 박스의 참조샷 동기화. create=true(새 박스 드래그)면 참조샷이 없을 때 현재 객체 것으로 만든다.
+    const b = LB.boxes[i]; if (!b) return;             // 옮기기·크기조절(create=false)은 '고치기'라 참조샷을 새로 만들지 않는다(전파 결과를 다듬을 때 칩이 쌓이지 않게)
     if (isFire() && b[0] === 1) { SMASK = null; return; }   // 연기 박스는 참조샷을 만들지 않는다(전파 대상 아님)
     const box = box4(b);
     const owner = seedForBox(i);
     if (owner) { owner.box = box; owner.i = i; if (owner.obj === SM.cur) SMASK = { box, poly: owner.poly || [] }; drawObjs(); }   // 윤곽선(poly)은 유지
-    else { SMASK = { box, poly: [] }; seedSet(box, [], SP, i); }
+    else if (create) { SMASK = { box, poly: [] }; seedSet(box, [], SP, i); }
     draw();
   };
   async function samPoint(x, y, label) {
@@ -580,12 +582,13 @@ function renderEditor(f) {
     const hits = (label === 1 && !SP.length) ? pool.filter(o => x >= o.b[1] && x <= o.b[1] + o.b[3] && y >= o.b[2] && y <= o.b[2] + o.b[4]) : [];
     const hit = hits.sort((a, b) => a.b[3] * a.b[4] - b.b[3] * b.b[4])[0] || null;   // 겹치면 가장 작은 박스
     SP.push([+x.toFixed(5), +y.toFixed(5), label]); draw();                       // 탭 점은 항상 남긴다(박스 프롬프트여도 표시·참조샷에 기록)
+    if (!hit && !SP.some(q => q[2] === 1)) return;                                  // 제외점만 있으면 마스크·박스를 만들지 않는다(포함점이나 박스가 있어야 대상이 정해진다)
     const body = hit ? { clip: f.clip, t, pts: [], box: box4(hit.b) } : { clip: f.clip, t, pts: SP };
     await applyMask(t, body, hit);
   }
   async function samRecompute() {                    // 점이 바뀐 뒤 현재 객체 마스크 다시 계산
     const t = f.t; const sd0 = SM.seeds.find(q => near(q.t, t) && q.obj === SM.cur);
-    if (!SP.length) {                                  // 점을 다 지움 → 이 객체의 참조샷·박스 제거
+    if (!SP.some(q => q[2] === 1)) {                   // 포함점이 없음(다 지웠거나 제외점만) → 이 객체의 참조샷·박스 제거
       if (sd0 && sd0.i != null && LB.boxes[sd0.i]) { LB.boxes.splice(sd0.i, 1); SM.seeds.forEach(q => { if (near(q.t, t) && q.i != null && q.i > sd0.i) q.i -= 1; }); }
       SM.seeds = SM.seeds.filter(q => q !== sd0); SMASK = null; drawObjs(); draw(); saveNow(); return;
     }
@@ -620,28 +623,49 @@ function renderEditor(f) {
       const tag = el("button", null, samName(o)); tag.title = PROP_OBJ(o) ? "이 객체를 선택하고 탭·드래그" : "연기: 드래그로 직접 그린다. 전파하지 않는다(마스크가 연기 기둥을 못 따라감)"; tag.style.cssText = `width:auto;height:auto;padding:2px 9px;font-size:11px;border-radius:6px;border:2px solid ${samCol(o)};color:${o === SM.cur ? "#06090f" : samCol(o)};background:${o === SM.cur ? samCol(o) : "transparent"};cursor:pointer`;
       tag.onclick = () => { SM.cur = o; loadSam(); };
       row.appendChild(tag);
-      SM.seeds.filter(sd => sd.obj === o).forEach(sd => {
-        const chip = el("span"); chip.style.cssText = `display:inline-flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid ${samCol(o)};border-radius:14px;padding:2px 6px 2px 10px;font-size:11px;font-weight:700`;
-        chip.innerHTML = `<b style="color:${samCol(o)};cursor:pointer" title="이 프레임으로 이동">${_disp(sd.t)}</b>`;
-        chip.querySelector("b").onclick = () => { SM.cur = o; openFrameAt(f.clip, sd.t, LB.mode); };   // 번호 클릭 = 이동
-        const x = el("span", null, "×"); x.style.cssText = "cursor:pointer;color:var(--mut)"; x.title = "참조샷 취소(박스는 손라벨에 그대로)";
-        x.onclick = () => { SM.seeds = SM.seeds.filter(q => q !== sd); if (near(sd.t, f.t) && sd.obj === SM.cur) { SP = []; SMASK = null; } drawObjs(); draw(); };
-        chip.appendChild(x); row.appendChild(chip);
-      });
+      if (!f.image) {                                // 이 객체의 라벨 프레임을 칩으로(손라벨·전파 구분 없음). 참조샷 칩만 초록 점 + ×(참조샷 취소). 이미지엔 프레임이 없다
+        const S = _labelStore() || [];
+        const hand = isFire() ? S.filter(r => r.clip === f.stem && r.cls === samCls(o)).map(r => quant(r.t)) : [];   // 사람 손라벨 박스엔 객체 번호가 없어 전파 결과·참조샷만
+        const sam = Object.entries(SAMMAP[f.clip] || {}).filter(([k, v]) => v && v[String(o)]).map(([k]) => +k);
+        const seedAt = t => SM.seeds.find(sd => sd.obj === o && near(sd.t, t));
+        const all = [...new Set([...hand, ...sam, ...SM.seeds.filter(sd => sd.obj === o).map(sd => sd.t)])].sort((x, y) => x - y);
+        if (!all.length) { const none = el("span", null, "라벨 없음"); none.style.cssText = "font-size:11px;color:var(--mut)"; row.appendChild(none); }
+        all.forEach(t => {
+          const sd = seedAt(t);
+          const chip = el("span"); chip.style.cssText = `display:inline-flex;align-items:center;gap:5px;background:var(--panel2);border:1px solid ${sd ? samCol(o) : "var(--line)"};border-radius:14px;padding:1px 6px 1px 8px;font-size:11px;font-weight:700${near(t, f.t) ? ";outline:2px solid var(--blue)" : ""}`;
+          chip.innerHTML = (sd ? `<i style="width:7px;height:7px;border-radius:50%;background:#3fb950;display:inline-block" title="참조샷"></i>` : "") + `<b style="color:${samCol(o)};cursor:pointer" title="이 프레임으로 이동">${_disp(t)}</b>`;
+          chip.querySelector("b").onclick = () => { SM.cur = o; openFrameAt(f.clip, t, LB.mode); };
+          if (sd) {
+            const x = el("span", null, "×"); x.style.cssText = "cursor:pointer;color:var(--mut)"; x.title = "참조샷 취소(박스는 그대로)";
+            x.onclick = () => { SM.seeds = SM.seeds.filter(q => q !== sd); if (near(sd.t, f.t) && sd.obj === SM.cur) { SP = []; SMASK = null; } drawObjs(); draw(); };
+            chip.appendChild(x);
+          }
+          row.appendChild(chip);
+        });
+      }
       if (SM.objs.length > 1 && !isFire()) { const del = el("span", null, "객체 삭제"); del.style.cssText = "cursor:pointer;color:var(--mut);font-size:11px"; del.onclick = async () => {
         const mine0 = SM.seeds.filter(q => q.obj === o);
-        if (!await uiConfirm(`객체 ${o}의 참조샷 ${mine0.length}개와 그 박스를 지웁니다. 계속할까요?`, { ok: "삭제", danger: true })) return;
+        const nProp = Object.values(SAMMAP[f.clip] || {}).filter(v => v && v[String(o)]).length;
+        if (!await uiConfirm(`객체 ${o}를 지웁니다: 참조샷 ${mine0.length}개 · 그 박스 · 전파 결과 ${nProp}프레임.\n박스가 하나도 남지 않는 프레임은 프레임 기록도 지워지고, 다른 객체가 남는 프레임은 유지됩니다. 계속할까요?`, { ok: "삭제", danger: true })) return;
         snap();
         const cur = mine0.find(q => near(q.t, f.t));
-        if (cur) { const i = LB.boxes.findIndex((b, k) => seedForBox(k) === cur); if (i >= 0) { LB.boxes.splice(i, 1); SM.seeds.forEach(q => { if (near(q.t, f.t) && q.i != null && q.i > i) q.i -= 1; }); } SP = []; SMASK = null; }
+        let touched = false;                            // 지금 프레임의 박스가 바뀌었나
+        if (cur) { const i = LB.boxes.findIndex((b, k) => seedForBox(k) === cur); if (i >= 0) { LB.boxes.splice(i, 1); SM.seeds.forEach(q => { if (near(q.t, f.t) && q.i != null && q.i > i) q.i -= 1; }); touched = true; } SP = []; SMASK = null; }
+        if (LB.src === "sam") { const n0 = LB.boxes.length; LB.boxes = LB.boxes.filter(b => b[5] !== o); touched = touched || LB.boxes.length !== n0; }   // 화면에 보이는 전파 박스도
         SM.objs = SM.objs.filter(q => q !== o); SM.seeds = SM.seeds.filter(q => q.obj !== o); if (SM.cur === o) SM.cur = SM.objs[0];
-        for (const q of mine0) {                       // 다른 프레임: 손라벨에서 그 박스만 뺀다
+        for (const q of mine0) {                       // 다른 프레임의 손라벨: 그 박스만 뺀다. 안 남으면 프레임 기록째 지운다
           if (near(q.t, f.t)) continue;
           const hb = existingBoxes(f.stem, q.t); if (!hb || !hb.length) continue;
           const keep = hb.filter(b => iou4(box4(b), q.box) < 0.7);
-          if (keep.length !== hb.length) { try { await postLabel(f.stem, q.t, f.W, f.H, keep, f.src); } catch (e) {} }
+          if (keep.length === hb.length) continue;
+          try { if (keep.length) await postLabel(f.stem, q.t, f.W, f.H, keep, f.src); else await clearLabel(f.stem, q.t); } catch (e) {}
         }
-        loadSam(); draw(); if (cur) saveNow(); else fillShots();
+        await postJSON("/api/sam2_drop_obj", { clip: f.clip, obj: o }).catch(() => {});   // 전파 결과(저장소)에서 이 객체를 뺀다
+        if (touched) {                                  // 지금 프레임: 남은 박스 저장, 안 남으면 기록째 삭제
+          if (LB.boxes.length) { LB.src = "hand"; await saveNow(); }
+          else { try { await clearLabel(f.stem, f.t); } catch (e) {} f.saved = null; LB.src = "none"; }
+        }
+        await refreshSam(); loadSam(); draw();
       }; row.appendChild(del); }
       rowObj.appendChild(row);
     });
@@ -825,7 +849,13 @@ function renderEditor(f) {
     }
     _watching = false;
     if (!seen) { if (mine()) drawObjs(); return; }   // 작업이 없었다 → 버튼 상태만 원래대로
-    if (mine()) { rowObj.style.pointerEvents = ""; rowObj.style.opacity = ""; bHand.disabled = false; bHand.style.opacity = ""; bGo.disabled = false; pstat.innerHTML = seen.err === "cancelled" ? '<span style="color:var(--mut)">취소됨</span>' : seen.err ? `<b style="color:#f85149">실패</b> <span style="color:var(--mut)">${seen.err}</span>` : ""; if (seen.err) setTimeout(() => { if (mine()) pstat.innerHTML = ""; }, 4000); }
+    if (mine()) {
+      rowObj.style.pointerEvents = ""; rowObj.style.opacity = ""; bHand.disabled = false; bHand.style.opacity = ""; bGo.disabled = false;
+      const dr = seen.drops || {}, skipped = (dr.lost || 0) + (dr.empty || 0) + (dr.size || 0);   // 프레임이 빠진 사유: 놓침(가림·이탈) · 크기 제한(참조 대비 3배/1/3 밖)
+      const why = skipped ? ` · 빠짐 ${skipped}` + (dr.lost + dr.empty ? ` (놓침 ${(dr.lost || 0) + (dr.empty || 0)}` : " (") + (dr.size ? `${dr.lost + dr.empty ? " · " : ""}크기제한 ${dr.size}` : "") + ")" : "";
+      pstat.innerHTML = seen.err === "cancelled" ? '<span style="color:var(--mut)">취소됨</span>' : seen.err ? `<b style="color:#f85149">실패</b> <span style="color:var(--mut)">${seen.err}</span>` : `<span style="color:var(--mut)">전파 ${seen.nframes || 0}프레임${why}</span>`;
+      setTimeout(() => { if (mine()) pstat.innerHTML = ""; }, seen.err ? 4000 : 12000);
+    }
     if (!seen.err) { SM.seeds = []; SM.handRef = false; SM.objs = objsFor(); SM.cur = 1; if (mine()) { SP = []; SMASK = null; styleHand(); drawObjs(); } }   // 참조샷은 전파에 쓰였으니 정리(저장소 seeds 에 남는다)
     await refreshSam();
   };
@@ -893,7 +923,7 @@ function renderEditor(f) {
       if (isFire()) { if (FIRE.objs.includes(n)) { SM.cur = n; loadSam(); } return; }
       if (!SM.objs.includes(n)) { SM.objs.push(n); SM.objs.sort((a, b) => a - b); } SM.cur = n; loadSam(); return;
     }
-    if (ev.key === "Delete" || ev.key === "Backspace") {                                 // 마우스 아래(또는 잡은) 박스를 객체 상관없이 지운다. 없으면 현재 객체의 점·참조샷·박스
+    if (ev.key === "Delete" || ev.key === "Backspace") {                                 // [규칙 3] 마우스 아래(또는 잡은) 박스 + 그 참조샷. 마지막 박스였으면 저장 시 '검토완료(객체 없음)' 마커. 박스가 없으면 현재 객체의 점·참조샷
       ev.preventDefault();
       const i = (sel !== null && LB.boxes[sel]) ? sel : (lastP ? boxUnder(lastP) : null);
       if (i !== null && i !== undefined && LB.boxes[i]) {
@@ -1018,9 +1048,11 @@ function openShot(f, items, idx) {
   const cap = el("div"); cap.style.cssText = "color:var(--tx);font-size:12px;font-weight:700";
   const row = el("div"); row.style.cssText = "display:flex;gap:8px;align-items:center";
   const mk = (t, danger) => { const b = el("button", null, t); b.style.cssText = "width:auto;padding:5px 12px;border-radius:6px;font-weight:700;cursor:pointer;background:var(--panel2);color:" + (danger ? "#f85149" : "var(--tx)") + ";border:1px solid " + (danger ? "#f8514966" : "var(--line)"); return b; };
-  const bDel = mk("프레임 삭제", true), bClose = mk("닫기", false);
+  const bGoto = mk("프레임 보기", false), bDel = mk("프레임 삭제", true), bClose = mk("닫기", false);
+  bGoto.title = "이 프레임을 라벨 편집기에서 연다(같은 프레임 번호)";
+  bGoto.style.cssText += ";color:var(--blue);border-color:var(--blue)";
   const hint = el("span", null, "박스 변 드래그 = 크기 · 안쪽 드래그 = 이동 · Del = 박스 삭제 · ←/→ 이동 · 우클릭 = 편집기로"); hint.style.cssText = "color:var(--mut);font-size:11px;margin-left:8px";
-  row.appendChild(bDel); row.appendChild(bClose); row.appendChild(hint);
+  row.appendChild(bGoto); row.appendChild(bDel); row.appendChild(bClose); row.appendChild(hint);
   let boxes = [], busy = false, lastP = null;
   const cur = () => items[idx];
   const norm = ev => { const rc = im.getBoundingClientRect(); return { x: (ev.clientX - rc.left) / rc.width, y: (ev.clientY - rc.top) / rc.height, tx: 8 / rc.width, ty: 8 / rc.height }; };
@@ -1112,7 +1144,9 @@ function openShot(f, items, idx) {
   const done = () => { v.remove(); document.onkeydown = _k0; };
   bClose.onclick = done;
   v.onclick = ev => { if (ev.target === v) done(); };
-  v.oncontextmenu = ev => { ev.preventDefault(); const t = cur().t; done(); const g = document.getElementById("autoGrid"); if (g) g.remove(); openFrameAt(f.clip, t, LB.mode); };
+  const goEdit = () => { const t = cur().t; done(); const g = document.getElementById("autoGrid"); if (g) g.remove(); openFrameAt(f.clip, t, LB.mode); };   // 확대창·격자 닫고 편집기를 이 프레임(t)으로
+  bGoto.onclick = goEdit;
+  v.oncontextmenu = ev => { ev.preventDefault(); goEdit(); };
   document.onkeydown = ev => {
     if (document.getElementById("uiDlg")) return;    // 대화상자가 떠 있으면 그쪽이 처리
     if (ev.key === "Escape") { ev.preventDefault(); done(); return; }
@@ -1140,7 +1174,9 @@ function buildFrameBar(f, status) {
   {                                                   // 전파 구간 입력칸(비우면 자동 = 클립 처음~끝)
     const SMb = samState(f.clip);
     const mkIn = (label, key) => {
-      const lab = el("span", "now", label); lab.style.cssText = "color:var(--mut);font-size:11px;margin-left:2px";
+      const lab = el("button", null, label); lab.title = `지금 프레임을 ${label} 프레임으로`;   // 글자를 누르면 지금 프레임이 시작/종료가 된다
+      lab.style.cssText = "width:auto;height:auto;padding:2px 6px;margin-left:2px;font-size:11px;font-weight:700;color:var(--mut);background:transparent;border:1px solid var(--line);border-radius:6px;cursor:pointer";
+      lab.onclick = () => { SMb[key] = f.t; if (SMb.a != null && SMb.b != null && SMb.a > SMb.b) { const t = SMb.a; SMb.a = SMb.b; SMb.b = t; } if (ED && ED.fillShots) ED.fillShots(); };
       const inp = el("input"); inp.type = "text"; inp.inputMode = "numeric"; inp.placeholder = "자동";
       inp.style.cssText = "width:48px;align-self:stretch;box-sizing:border-box;background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;text-align:center;font:700 12px ui-monospace,Menlo,monospace;padding:0 4px";
       inp.value = SMb[key] == null ? "" : _disp(SMb[key]);
@@ -1245,6 +1281,7 @@ function drawTrack(track, f) {
 
 // 미리보기 한 줄 = 학습 프레임(손라벨 ∪ SAM). 눌러서 그 프레임으로 넘어간다. × = 그 프레임의 라벨 삭제(보이는 출처만)
 function renderShotRow(row, f, hooks) {
+  if (f.image) { row.innerHTML = ""; row.style.display = "none"; return; }   // 정지 이미지: 프레임이 하나뿐이라 미리보기 줄이 없다(cssText 로 다시 켜지지 않게 여기서 막는다)
   const handS = shotSecs(f.stem), handSet = new Set(handS.map(([s]) => s));
   const smap = SAMMAP[f.clip] || {};
   const shots = [...handS.map(([s, n]) => [s, n, "hand"]), ...samFramesOf(f.clip).filter(s => !handSet.has(s)).map(s => [s, Object.keys(smap[tkey(s)] || {}).length, "sam"])].sort((a, b) => a[0] - b[0]);
@@ -1303,9 +1340,10 @@ function toggleHelp() {
   h.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:50;background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:12px 16px;font-size:12px;line-height:1.9;box-shadow:0 8px 24px #0008;min-width:260px";
   h.innerHTML = '<div style="font-weight:800;margin-bottom:4px">단축키 <span style="color:var(--mut);font-weight:400">(? 닫기)</span></div>' +
     [["클릭", "SAM 점(현재 객체) · 박스 안이면 그 박스로 프롬프트"], ["우클릭", "제외점"], ["드래그", "현재 객체 박스(빈 곳=새로, 박스 안=이동, 변=크기)"],
-     ["1 ~ 8", "객체 선택 (화재: 1 불 · 2 연기)"], ["Del", "마우스 아래 박스 삭제"], ["C", "이전 프레임 박스 복사"],
+     ["1 ~ 8", "객체 선택 (화재: 1 불 · 2 연기)"], ["Del", "마우스 아래 박스 삭제(+그 참조샷). 마지막 박스면 '검토완료·객체 없음'으로 남음"], ["C", "이전 프레임 박스 복사"],
      ["Ctrl+Z / Ctrl+Shift+Z", "되돌리기 / 다시"], ["W / E, ← / →", "이전 / 다음 프레임"], ["Shift+← / →", "10칸"], ["[ / ]", "전파 시작 / 종료 프레임"],
-     ["휠", "확대·축소"], ["0", "확대 해제"], ["Space+드래그", "확대 화면 이동"]]
+     ["휠", "확대·축소"], ["0", "확대 해제"], ["Space+드래그", "확대 화면 이동"],
+     ["미리보기 ×", "프레임 라벨 삭제 = 박스 전부 + 그 프레임 참조샷 전부(검토완료로 남음)"], ["객체 삭제", "참조샷·박스·전파 결과 전부. 박스가 안 남는 프레임은 기록째 삭제, 다른 객체 남으면 유지"], ["참조샷 ×", "참조샷만 취소, 박스는 그대로"]]
       .map(([k, v]) => `<div><kbd style="background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:0 6px;font-family:ui-monospace,Menlo,monospace">${k}</kbd> <span style="color:var(--mut)">${v}</span></div>`).join("");
   document.body.appendChild(h);
 }
