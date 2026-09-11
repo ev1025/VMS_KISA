@@ -29,6 +29,21 @@ function applyMode() {
   }
 }
 // ---------- 부트 ----------
+function dedupResults(data) {
+  const SUMMARY = /^(KISA_SCORES|NIGHT_SUMMARY|FOG_SUMMARY)$/;   // 실험이 아니라 요약 파일
+  data = data.filter(d => !SUMMARY.test(d.name));
+  const rank = d => { const m = d.meta || {}; return (m.model ? 4 : 0) + (m.kind === "live_sa" ? 2 : m.kind === "archive" ? 0 : 3) + (d.clips && Object.keys(d.clips).length ? 1 : 0); };   // 대표 우선순위(러너 메타 > 라이브 > 보관, 클립 있으면 가점)
+  const g = {};
+  data.forEach(d => { const k = d.item + "|" + d.score + "|" + d.tp + "|" + d.fn + "|" + d.fp; (g[k] || (g[k] = [])).push(d); });   // 같은 항목·같은 결과 = 한 묶음
+  return Object.values(g).map(list => {
+    list.sort((a, b) => rank(b) - rank(a) || b.mtime - a.mtime);
+    const rep = list[0];
+    rep._members = [...new Set(list.map(d => d.name))];   // 이 결과를 낸 실험/재기록 전부
+    if (!(rep.clips && Object.keys(rep.clips).length)) { const c = list.find(d => d.clips && Object.keys(d.clips).length); if (c) rep.clips = c.clips; }
+    if (!(rep.rules && rep.rules.length > 1)) { const r = list.find(d => d.rules && d.rules.length > 1); if (r) rep.rules = r.rules; }
+    return rep;
+  });
+}
 async function buildResults() {
   const c = $("#center");
   c.innerHTML = '<div class="empty">불러오는 중…</div>';
@@ -36,6 +51,7 @@ async function buildResults() {
   try { data = await (await fetch("/api/results")).json(); } catch (e) { c.innerHTML = '<div class="empty">결과를 못 읽었습니다</div>'; return; }
   try { q = await (await fetch("/api/queue")).json(); } catch (e) {}
   const ITEMS = ["방화", "침입", "배회", "쓰러짐"];
+  data = dedupResults(data);   // 같은 결과 여러 출처/재시도 → 한 줄로 접고, 요약 파일 제외
   const wrap = el("div"); wrap.style.cssText = "padding:18px 22px;max-width:1180px;margin:0 auto;width:100%";
   const head = el("div"); head.style.cssText = "display:flex;align-items:center;gap:10px;margin-bottom:2px";
   head.appendChild(el("div", "rtitle", `실험 채점 비교 <span class="tag">${data.length}건</span> <span style="color:var(--mut);font-weight:400;font-size:11px">· KISA 검증영상 F1 (항목별)</span>`));
@@ -118,7 +134,7 @@ async function buildResults() {
       const top = d.score === best, m = d.meta || {};
       const tr = el("tr"); tr.style.cssText = "border-top:1px solid var(--line);cursor:pointer" + (top ? ";background:#3fb95012" : "");
       tr.innerHTML =
-        `<td style="padding:9px 6px;font-weight:${top ? 800 : 600};white-space:nowrap">${top ? "★ " : ""}${d.name}</td>` +
+        `<td style="padding:9px 6px;font-weight:${top ? 800 : 600};white-space:nowrap">${top ? "★ " : ""}${d.name}${(d._members || []).length > 1 ? ` <span style="color:var(--mut);font-weight:400">외 ${d._members.length - 1}건</span>` : ""}</td>` +
         `<td style="font-size:11px;line-height:1.5">${confOf(d)}</td><td style="color:var(--mut);font-size:11px;line-height:1.5;white-space:nowrap">${trainOf(d)}</td>` +
         `<td style="font-weight:800;font-size:14px;color:${col(d.score)};font-variant-numeric:tabular-nums">${d.score.toFixed(2)}${d.rule && d.rule.startsWith("신규칙") ? '<span style="font-size:9px;color:var(--mut);margin-left:3px">신</span>' : ""}</td>` +
         `<td style="font-weight:700;color:${d.score_old == null ? "var(--mut)" : col(d.score_old)};font-variant-numeric:tabular-nums">${d.score_old == null ? "–" : d.score_old.toFixed(2)}</td>` +
@@ -127,13 +143,14 @@ async function buildResults() {
         `<td style="color:var(--mut);user-select:none" title="구성 상세 · 규칙 스윕 전체">▸</td>`;
       tb.appendChild(tr);
       // 펼침: 구성 표(이름 → 뜻) + 규칙 스윕 표
-      const kv = [["실험", d.name], ["항목", item], ["모델", m.model], ["베이스", m.base ? `${m.base} = ${dsName(m.base)}` : null],
+      const kv = [["모델", m.model], ["베이스", m.base ? `${m.base} = ${dsName(m.base)}` : null],
         ["추가셋", (m.extras || []).length ? m.extras.map(x => `${x} = ${dsName(x)}`).join("<br>") : null],
         ["오버샘플", m.oversample ? Object.entries(m.oversample).map(([k, v]) => `${k} = ${dsName(k)} ×${v}`).join("<br>") : null],
         ["학습 설정", m.train ? Object.entries(m.train).map(([k, v]) => `${k}=${v}`).join(" · ") : null],
         ["추가 옵션", m.extra && Object.keys(m.extra).length ? Object.entries(m.extra).map(([k, v]) => `${k}=${v}`).join(" · ") : null],
         ["학습 장수", m.n_train ? Number(m.n_train).toLocaleString() : null],
-        ["시작 → 끝 (KST)", m.started ? `${m.started} → ${m.ended || "진행 중"}` : null], ["상태", m.status], ["출처", m.note]].filter(([, v]) => v != null && v !== "");
+        ["시작 → 끝 (KST)", m.started ? `${m.started} → ${m.ended || "진행 중"}` : null],
+        ["동점·재기록", (d._members || []).length > 1 ? d._members.join(" · ") : null]].filter(([, v]) => v != null && v !== "");
       const sub = el("tr"); sub.hidden = true;
       sub.innerHTML = `<td colspan="11" style="padding:6px 14px 12px;font-size:11px">` +
         `<div style="display:grid;grid-template-columns:max-content 1fr;gap:3px 14px;max-width:820px">${kv.map(([k, v]) => `<span style="color:var(--mut)">${k}</span><span>${v}</span>`).join("")}</div>` +
