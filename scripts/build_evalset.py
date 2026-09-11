@@ -36,6 +36,21 @@ def eval_clip(stem):
     return mp4
 
 
+def fire_start(mp4):
+    """KISA XML(영상 옆 같은 이름 .xml)의 Alarm/StartTime 중 가장 이른 것(초). 없으면 None."""
+    import xml.etree.ElementTree as ET
+    x = mp4.with_suffix(".xml")
+    if not x.exists():
+        return None
+    def secs(txt):
+        p = [int(v) for v in str(txt).strip().split(":")]
+        while len(p) < 3:
+            p.insert(0, 0)
+        return p[0] * 3600 + p[1] * 60 + p[2]
+    st = [secs(al.findtext("StartTime")) for al in ET.parse(x).getroot().iter("Alarm") if al.findtext("StartTime")]
+    return min(st) if st else None
+
+
 def sam_cls(obj):                                   # SAM 저장소 객체 번호 → 클래스(대시보드 규약: 화재 1=불(0) 2=연기(1), 사람 0)
     return max(0, min(1, int(obj) - 1)) if a.mode == "fire" else 0
 
@@ -72,10 +87,10 @@ if a.bg > 0:
         mp4 = eval_clip(stem)
         if not mp4:
             continue
-        spans = GTA.fire_spans(mp4)
-        if not spans:
+        st = fire_start(mp4)
+        if st is None:
             stats["배경 생략:발생시각 없음"] += 1; continue
-        end = min(sp["start"] for sp in spans) - a.bg_margin
+        end = st - a.bg_margin
         if end < 2:
             stats["배경 생략:구간 짧음"] += 1; continue
         for i in range(a.bg):
