@@ -219,7 +219,7 @@ const FIRE = { objs: [1, 2], name: { 1: "불", 2: "연기(수동)" }, color: { 1
 // 전파 대상 객체인가. 화재는 불(1)만 전파한다 — 연기는 마스크가 기둥의 진한 중심만 잡아 손 박스와 4배까지 벌어진다(IoU 0.2).
 // 연기는 드래그로 그린 손라벨만 학습에 쓴다.
 const PROP_OBJ = o => !isFire() || o === 1;
-const SAM_COLORS = ["#e8913a", "#58a6ff", "#d2a8ff", "#3fb950", "#f778ba", "#79c0ff", "#ffa657", "#56d364"];
+const SAM_COLORS = ["#e8913a", "#2ee6c5", "#d2a8ff", "#f778ba", "#ffa657", "#c297ff", "#56d364", "#ff7b72"];   // 손라벨(#58a6ff)·정답(#79c0ff)·없음(#3fb950) 색과 겹치지 않게
 const isFire = () => LB.mode === "fire";
 const objsFor = () => isFire() ? FIRE.objs.slice() : [1];                                   // 모드별 기본 객체 목록
 const samCol = o => isFire() ? (FIRE.color[o] || FIRE.color[2]) : SAM_COLORS[(o - 1) % SAM_COLORS.length];
@@ -387,6 +387,7 @@ function renderEditor(f) {
   };
   drawRef = draw;
   const saveNow = async () => {                       // 화면 박스 → 손라벨 저장(SAM 전파 결과·정답 초안은 보이는 그대로 손라벨로)
+    LB.boxes.forEach((b, i) => { if (b[5] == null) { const q = seedForBox(i); const o = q ? q.obj : (isFire() ? objOfCls(b[0]) : null); if (o != null) b[5] = o; } });   // 객체 번호를 채워 저장(옛 박스도)
     try {
       await postLabel(f.stem, f.t, f.W, f.H, LB.boxes, f.src);
       f.saved = LB.boxes.map(b => b.slice()); LB.src = "hand";
@@ -469,7 +470,7 @@ function renderEditor(f) {
     if (_space) { pan = { sx: ev.clientX, sy: ev.clientY, tx0: _tx, ty0: _ty }; ov.style.cursor = "grabbing"; return; }   // 스페이스+드래그 = 확대이미지 이동
     const p = toImg(ev);
     const h = ev.button === 2 || ev.shiftKey ? null : hitTest(p);   // 우클릭·Shift 는 변 잡기 없음
-    if (h) { snap(); rz = h; sel = h.i; return; }
+    if (h) { snap(); rz = h; rz.owner = seedForBox(h.i); sel = h.i; return; }   // 소유 참조샷은 움직이기 전에 잡아둔다(옮긴 뒤 IoU 로 찾으면 놓친다)
     if (ev.button !== 0) return;
     sd = { p, u: ev.shiftKey ? null : boxUnder(p) };   // 누른 자리 기억. 끌면 박스(빈 곳=새 박스 · 박스 안=이동), 안 끌면 onclick 에서 점
   };
@@ -484,7 +485,7 @@ function renderEditor(f) {
     const p = lastP;
     if (sd) {                                        // 3px 넘게 끌면 드래그 시작(클릭=점 과 구분)
       if (Math.hypot(p.x - sd.p.x, p.y - sd.p.y) < 3) return;
-      if (sd.u !== null) { const b = LB.boxes[sd.u]; snap(); mv = { i: sd.u, ox: sd.p.x - b[1] * f.W, oy: sd.p.y - b[2] * f.H }; sel = sd.u; }
+      if (sd.u !== null) { const b = LB.boxes[sd.u]; snap(); mv = { i: sd.u, ox: sd.p.x - b[1] * f.W, oy: sd.p.y - b[2] * f.H, owner: seedForBox(sd.u) }; sel = sd.u; }
       else { curCls = samCls(SM.cur); st = sd.p; }   // 새 박스 = 현재 객체(화재: 1 불 · 2 연기)
       sd = null; _resized = true;                     // 드래그 뒤의 click 은 점으로 안 찍는다
     }
@@ -496,8 +497,8 @@ function renderEditor(f) {
   };
   const finish = ev => {
     if (pan) { pan = null; ov.style.cursor = _space ? "grab" : "crosshair"; return; }   // 이동 끝
-    if (rz) { const i = rz.i; rz = null; _resized = true; seedFromBox(i, false); sel = null; draw(); saveNow(); return; }   // 크기조절 끝 → (참조샷이 있으면) 따라가고 저장
-    if (mv) { const i = mv.i; mv = null; seedFromBox(i, false); sel = null; draw(); saveNow(); return; }                    // 이동 끝 → (참조샷이 있으면) 따라가고 저장
+    if (rz) { const i = rz.i, ow = rz.owner; rz = null; _resized = true; seedFromBox(i, false, ow); sel = null; draw(); saveNow(); return; }   // 크기조절 끝 → (참조샷이 있으면) 따라가고 저장
+    if (mv) { const i = mv.i, ow = mv.owner; mv = null; seedFromBox(i, false, ow); sel = null; draw(); saveNow(); return; }                    // 이동 끝 → (참조샷이 있으면) 따라가고 저장
     sd = null;
     if (!st) return; const p = toImg(ev);
     const x = Math.min(st.x, p.x), y = Math.min(st.y, p.y), w = Math.abs(p.x - st.x), h = Math.abs(p.y - st.y); st = null;
@@ -528,12 +529,14 @@ function renderEditor(f) {
     return best || here.find(q => q.i === i) || null;
   };
   const clipPoly = (poly, box) => (poly || []).map(p => [Math.min(Math.max(p[0], box[0]), box[0] + box[2]), Math.min(Math.max(p[1], box[1]), box[1] + box[3])]);   // 마스크 윤곽선을 박스 안으로 자른다(박스를 줄이면 마스크도 그만큼 줄어 보인다)
-  const seedFromBox = (i, create) => {               // 박스의 참조샷 동기화. create=true(새 박스 드래그)면 참조샷이 없을 때 현재 객체 것으로 만든다.
+  const seedFromBox = (i, create, ownerIn) => {   // ownerIn: 움직이기 전에 잡아둔 소유 참조샷(있으면 IoU 재탐색 대신 그걸 쓴다)               // 박스의 참조샷 동기화. create=true(새 박스 드래그)면 참조샷이 없을 때 현재 객체 것으로 만든다.
     const b = LB.boxes[i]; if (!b) return;             // 옮기기·크기조절(create=false)은 '고치기'라 참조샷을 새로 만들지 않는다(전파 결과를 다듬을 때 칩이 쌓이지 않게)
     if (isFire() && b[0] === 1) { SMASK = null; return; }   // 연기 박스는 참조샷을 만들지 않는다(전파 대상 아님)
     const box = box4(b);
-    const owner0 = seedForBox(i);
-    const owner = (create && owner0 && owner0.obj !== SM.cur) ? null : owner0;   // 새 박스 드래그는 현재 객체로만: 겹친 다른 객체 박스에 IoU 로 붙지 않게
+    const owner0 = ownerIn !== undefined ? ownerIn : seedForBox(i);
+    const owner = (create && owner0 && owner0.obj !== SM.cur) ? null : owner0;
+    const objKeep = owner ? owner.obj : (b[5] != null ? +b[5] : (create ? SM.cur : (isFire() ? objOfCls(b[0]) : null)));
+    if (objKeep != null) b[5] = objKeep;               // 객체 번호를 박스에 박아 저장까지 남긴다(참조샷을 잃어도 번호·색 유지)   // 새 박스 드래그는 현재 객체로만: 겹친 다른 객체 박스에 IoU 로 붙지 않게
     if (owner) { owner.poly = clipPoly(owner.poly, box); owner.box = box; owner.i = i; if (owner.obj === SM.cur) SMASK = { box, poly: owner.poly }; drawObjs(); }   // 박스를 옮기거나 줄이면 마스크도 박스 안으로 잘라 따라가게
     else if (create) { SMASK = { box, poly: [] }; seedSet(box, [], SP, i); }
     draw();
