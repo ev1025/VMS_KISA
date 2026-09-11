@@ -21,18 +21,15 @@ NAMES = ["fire", "smoke"] if a.mode == "fire" else ["person"]
 stats = collections.Counter()
 
 
-def clip_full(stem):
-    return next(RAW.rglob(stem + ".mp4"), None)
+EVAL_CATS = sorted(c for c, cfg in D.all().items() if cfg.get("use") == "eval" and cfg.get("mode") == a.mode)
+EVAL_MP4 = {p.stem: p for c in EVAL_CATS for p in (RAW / c).rglob("*.mp4")}   # 채점 전용 카테고리 안만 한 번 훑는다(원본데이터 전체 rglob 은 COCO 12만 장 때문에 느리다)
 
 
 def eval_clip(stem):
     """채점 전용 카테고리의 영상이면 경로, 아니면 None."""
-    mp4 = clip_full(stem)
+    mp4 = EVAL_MP4.get(stem)
     if not mp4:
-        stats["영상 없음"] += 1; return None
-    cat = mp4.relative_to(RAW).parts[0]
-    if D.get(cat).get("use") != "eval":
-        stats[f"제외:use!=eval({cat})"] += 1; return None
+        stats["제외:채점 전용 영상 아님"] += 1
     return mp4
 
 
@@ -67,13 +64,9 @@ for r in rows:
     if int(r.get("cls", -1)) >= 0:
         frames[key].append((int(r["cls"]), [r["x"], r["y"], r["w"], r["h"]]))
 # 2) SAM 전파 결과(채점 전용 클립만, 손라벨 없는 프레임만)
-vids = {}
 for f in sorted((V / "data/학습데이터/자동라벨/sam2").glob("*.json")):
     stem = f.stem
-    mp4 = vids.get(stem)
-    if mp4 is None:
-        mp4 = clip_full(stem); vids[stem] = mp4 or False
-    if not mp4 or D.get(mp4.relative_to(RAW).parts[0]).get("use") != "eval":
+    if stem not in EVAL_MP4:
         continue
     d = json.load(io.open(f, encoding="utf-8"))
     for k, objs in (d.get("frames") or {}).items():
