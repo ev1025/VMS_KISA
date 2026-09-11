@@ -95,8 +95,9 @@ def build_lists(exp, defaults):
     vs = exp.get("val_set", defaults.get("val_set"))       # 권장: build_evalset.py 가 만든 검증 전용 val.txt(채점 전용 영상의 손라벨). 학습과 겹치지 않는다
     if vs and Path(vs).is_file():
         val_path = Path(vs)
+    names = list(exp.get("names", defaults.get("names", ["fire", "smoke"])))   # 항목별 클래스(사람 큐 = ['person'])
     (d / "data.yaml").write_text(
-        f"path: {d}\ntrain: {d/'train.txt'}\nval: {val_path}\nnc: 2\nnames: ['fire','smoke']\n")
+        f"path: {d}\ntrain: {d/'train.txt'}\nval: {val_path}\nnc: {len(names)}\nnames: {names}\n")
     return d, len(lines) - 1
 
 
@@ -179,10 +180,22 @@ def train_cmd(exp, defaults, data_yaml, n_train=0):
     return cmd
 
 
+def eval_map(exp, pt):
+    """채점 전용 검증셋 mAP(학습에 안 들어간 배포 검증영상 라벨). 검증셋을 먼저 다시 빌드해 새 라벨까지 반영 → results/<exp>/eval_map.json"""
+    item = exp.get("item", "방화"); mode = "fire" if item == "방화" else "person"
+    try:
+        subprocess.run([str(PY), str(V / "scripts/build_evalset.py"), mode], capture_output=True, text=True, cwd=V, timeout=600)
+        if (V / "data/학습데이터" / f"evalset_{mode}" / "data.yaml").exists():
+            subprocess.run([str(PY), str(V / "scripts/eval_map.py"), mode, "--exp", exp["name"], "--pt", str(pt)], capture_output=True, text=True, cwd=V, timeout=1800)
+    except Exception as e:
+        log(f"{exp['name']} eval_map 실패: {e}")
+
+
 def score(exp, pt):
     item = exp.get("item", "방화")
     vids = SCORE_VIDEOS.get(item)
     rdir = V / "results" / exp["name"]; rdir.mkdir(parents=True, exist_ok=True)
+    eval_map(exp, pt)                                        # 항목 무관: 채점셋 mAP 는 항상 잰다
     if vids is None:
         (rdir / "score.txt").write_text(f"=== {exp['name']} ===\n(항목 {item} 채점기 미연결)\n")
         return None
@@ -190,13 +203,6 @@ def score(exp, pt):
            "--stride", "0.5", "--imgsz", "640", "--tiles", "--tag", exp["name"]]
     out = subprocess.run(cmd, capture_output=True, text=True, cwd=V).stdout
     (rdir / "score.txt").write_text(f"=== {exp['name']} 타일 ===\n" + out)
-    try:                                                    # 채점 전용 검증셋 mAP(학습에 안 들어간 배포 검증영상 라벨) → results/<exp>/eval_map.json
-        mode = "fire" if item == "방화" else "person"
-        subprocess.run([str(PY), str(V / "scripts/build_evalset.py"), mode], capture_output=True, text=True, cwd=V, timeout=600)   # 채점 영상에 새로 친 라벨까지 검증셋에 반영(매번 다시 빌드, 수 초)
-        if (V / "data/학습데이터" / f"evalset_{mode}" / "data.yaml").exists():
-            subprocess.run([str(PY), str(V / "scripts/eval_map.py"), mode, "--exp", exp["name"], "--pt", str(pt)], capture_output=True, text=True, cwd=V, timeout=1800)
-    except Exception as e:
-        log(f"{exp['name']} eval_map 실패: {e}")
     return out
 
 

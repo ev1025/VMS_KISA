@@ -23,6 +23,7 @@ ap.add_argument("--name", default=None)
 ap.add_argument("--val", type=float, default=0.1)
 ap.add_argument("--max-gt", type=int, default=0, help="카테고리당 원본 정답 이미지 상한(0=전부)")
 ap.add_argument("--neg", type=int, default=5, help="손라벨 클립당 앞/뒤 각 하드 네거티브 장수(0=끔). 상한=그 클립 양성 프레임 수")
+ap.add_argument("--no-gt", action="store_true", help="원본 정답 이미지는 넣지 않는다(우리 라벨만: 손·전파·하드네거·이미지 손라벨). 오버샘플용 handset")
 ap.add_argument("--dry", action="store_true")
 a = ap.parse_args()
 
@@ -163,6 +164,8 @@ for cat, cfg in sorted(D.all().items()):
         if rel in hand_imgs:
             boxes, src_name = hand_imgs[rel], "hand"
         else:
+            if a.no_gt:
+                continue                                     # --no-gt: 우리 라벨만
             if cfg.get("gt") in (None, "none"):
                 continue                                     # 정답 없고 손라벨도 없는 이미지는 안 넣는다
             if a.max_gt and n_gt >= a.max_gt:
