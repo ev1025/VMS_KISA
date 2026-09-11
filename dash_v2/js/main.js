@@ -44,11 +44,13 @@ async function buildResults() {
 
   // ---- 큐 상태 (exp_queue.py): 실행 중 실험 + 러너 로그 끝 ----
   const qb = el("div"); qb.style.cssText = "margin-top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:11px;line-height:1.7";
+  const renderQueue = q => {                        // 큐 상자만 다시 그린다(30초 갱신 때 화면 전체를 다시 만들지 않게: 펼친 행·스크롤 유지)
   const Y = new Date().getFullYear();
   const kst = l => l.replace(/^\[(\d\d)-(\d\d) (\d\d):(\d\d)\]/, (_, mo, da, h, mi) => {   // 옛 러너 줄(UTC, KST 표기 없음) → +9시간. 새 줄은 러너가 KST 로 쓴다
     const d = new Date(Date.UTC(Y, +mo - 1, +da, +h, +mi) + 9 * 3600e3), z = n => String(n).padStart(2, "0");
     return `[${z(d.getUTCMonth() + 1)}-${z(d.getUTCDate())} ${z(d.getUTCHours())}:${z(d.getUTCMinutes())} KST]`;
   });
+    const open = !!(qb.querySelector("details") && qb.querySelector("details").open);   // 러너 로그 펼침 상태 유지
   const lastLog = (q.log || []).slice(-6).map(l => `<div style="color:var(--mut);font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap">${kst(l).replace(/</g, "&lt;")}</div>`).join("");
   qb.innerHTML = `<div style="font-weight:800">큐 <span style="color:${q.running.length ? "#3fb950" : "var(--mut)"}">${q.running.length ? "실행 중 " + q.running.length + "잡" : "대기/없음"}</span>` +
     (q.running.length ? ` <span style="color:var(--tx);font-weight:600">${q.running.join(" · ")}</span>` : "") + `</div>` +
@@ -62,8 +64,15 @@ async function buildResults() {
         `<td style="padding:3px 10px;font-variant-numeric:tabular-nums">${j.val ? `${j.val.map50.toFixed(3)} / ${j.val.map5095.toFixed(3)} <span style="color:var(--mut)">(P ${j.val.P.toFixed(2)} R ${j.val.R.toFixed(2)})</span>` : '<span style="color:var(--mut)">첫 검증 전</span>'}</td>` +
         `<td style="padding:3px 10px">${j.mem}</td></tr>`).join("") + `</tbody></table>` : "") +
     `<details><summary style="cursor:pointer;color:var(--mut)">러너 로그</summary>${lastLog || '<div style="color:var(--mut)">로그 없음</div>'}</details>`;
+    if (open) qb.querySelector("details").open = true;
+  };
+  renderQueue(q);
   wrap.appendChild(qb);
-  if ((q.jobs || []).length && CUR.mode === "results") { clearTimeout(window._resT); window._resT = setTimeout(() => { if (CUR.mode === "results") buildResults(); }, 30000); }   // 학습 중이면 30초마다 갱신
+  const tick = async () => {                       // 학습 중이면 30초마다 큐 상자만 갱신
+    if (CUR.mode !== "results" || !document.body.contains(qb)) return;
+    try { const q2 = await (await fetch("/api/queue")).json(); renderQueue(q2); if ((q2.jobs || []).length) window._resT = setTimeout(tick, 30000); } catch (e) {}
+  };
+  clearTimeout(window._resT); if ((q.jobs || []).length) window._resT = setTimeout(tick, 30000);
 
   const col = s => s >= 90 ? "#3fb950" : s >= 70 ? "#d29922" : "#f85149";
   const fmtT = m => { const d = new Date(m * 1000); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
