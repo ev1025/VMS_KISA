@@ -158,7 +158,7 @@ async function showRawImage(rel) {
     let g = `<svg viewBox="0 0 ${W} ${H}" style="position:absolute;inset:0;width:100%;height:100%">`;
     boxes.forEach(b => {
       const x = (b[1] - b[3] / 2) * W, y = (b[2] - b[4] / 2) * H;
-      g += `<rect x="${x}" y="${y}" width="${b[3] * W}" height="${b[4] * H}" fill="none" stroke="${b[0] ? "#a371f7" : "#f85149"}" stroke-width="3"/>`;   // 불=빨강, 연기=보라
+      g += `<rect x="${x}" y="${y}" width="${b[3] * W}" height="${b[4] * H}" fill="none" stroke="${clsColorFor(catMode(rel), b[0])}" stroke-width="3"/>`;   // 편집기와 같은 색 규약(화재 0 불·1 연기, 사람 객체색)
     });
     ov.innerHTML = g + "</svg>";
   };
@@ -205,7 +205,10 @@ function imageRightPanel(rel, editing, nGT) {
 // 카테고리(데이터셋)별 라벨 모드. 사용자가 고른 값(서버 catmode.json)이 이름 규칙보다 우선한다.
 let DATASETS = {};                                 // 데이터 규격(datasets.yaml): {카테고리: {mode, media, gt, classes, use, note}} main.js boot 에서 받는다
 function catOf(rel) { return (rel || "").split("/")[2] || ""; }
-function isScoringCat(cat) { return /검증|채점|배포/.test(cat); }   // 채점 전용: 라벨해도 학습셋엔 안 들어간다(행에 eval 표시)
+function isScoringCat(cat) {                       // 채점 전용: 라벨해도 학습셋엔 안 들어간다(행에 eval 표시). 규격 파일(use: eval)이 기준, 없는 카테고리만 이름으로 짐작
+  const u = (DATASETS[cat] || {}).use;
+  return u ? u === "eval" : /검증|채점|배포/.test(cat);
+}
 function catModeAuto(cat) {                        // 이름으로 짐작하는 기본값(사용자가 안 고른 경우)
   if (/사람|침입|쓰러짐|배회|스토킹|이상행동|다각도|person|human|llvip|coco/i.test(cat)) return "person";
   return "fire";                                   // 나머지는 불·연기로 연다. 다르면 사용자가 바꾼다
@@ -250,14 +253,14 @@ function updateRawBadge(key) {
 }
 // 좌측 영상 클릭: 편집 중이면 그 영상 편집 유지, 아니면 재생
 function openClip(rel) {
-  saveSession({ dsKind: DS_KIND, dsSel: DS_SEL, rel: rel });   // 새로고침 복원용
+  saveSession({ dsKind: DS_KIND, dsSel: DS_SEL, rel: rel, img: null });   // 새로고침 복원용(이미지 기록은 비운다)
   showRawVideo(rel);   // showRawVideo 가 DS_EDIT 를 보고 에디터/영상 결정
 }
 // 원본 영상 한 편. XML 정답(이벤트 시각)이 있으면 같이 보여준다.
 let _SRV_SEQ = 0;   // 늦게 끝난 이전 호출이 우측 정보를 덮지 않게(새로고침 복원 때 첫 항목과 경쟁)
 async function showRawVideo(rel) {
   const _my = ++_SRV_SEQ;
-  try { saveSession({ dsKind: DS_KIND, dsSel: DS_SEL, rel: rel }); } catch (e) {}   // 새로고침 복원용
+  try { saveSession({ dsKind: DS_KIND, dsSel: DS_SEL, rel: rel, img: null }); } catch (e) {}   // 새로고침 복원용(이미지 기록은 비운다)
   const clip = rel.replace(/^data\/원본데이터\//, "").replace(/\.mp4$/, "");
   let events = [], dur = 0, ci = null;
   try { ci = await (await fetch("/api/clipinfo?clip=" + encodeURIComponent(clip))).json(); dur = ci.dur || 0; events = ci.fire || []; } catch (e) {}

@@ -23,6 +23,8 @@ const stemOf = pathStr => String(pathStr).split("/").pop();   // 라벨은 파�
 // ---------- 프레임 단위(사람 0.5초 · 화재 1초): 양자화·표시 변환은 전부 여기서 ----------
 function _step() { return LB.mode === "person" ? 0.5 : 1; }
 function quant(sec) { const q = 1 / _step(); return Math.round(sec * q) / q; }          // 시각을 프레임 격자에 맞춘다
+const GRID = 0.5;                                                                          // 모드와 무관한 공통 격자(사람 0.5 · 화재 1.0 의 공배수). 목록 배지처럼 모드 밖에서 셀 때 쓴다
+const gridKey = t => Math.round(t / GRID) * GRID;
 function tkey(sec) { return Number(sec).toFixed(1); }                                     // 저장소 키("190.5")
 function _disp(sec) { return LB.mode === "person" ? Math.round(sec * 2) : sec; }         // 사람: 화면엔 정수 프레임번호(초×2)
 function _undisp(v) { return LB.mode === "person" ? v / 2 : v; }
@@ -48,15 +50,15 @@ function shotSecs(clip) {
 // 초별 손라벨 종류: "box"=박스 있음 · "empty"=검토완료(박스 0, cls -1 마커)
 function shotKinds(clip) {
   const S = _labelStore(); const by = {};
-  if (S) S.filter(r => r.clip === clip).forEach(r => { const k = Math.round(r.t * 2) / 2; by[k] = (by[k] === "box" || r.cls >= 0) ? "box" : "empty"; });
+  if (S) S.filter(r => r.clip === clip).forEach(r => { const k = gridKey(r.t); by[k] = (by[k] === "box" || r.cls >= 0) ? "box" : "empty"; });
   return by;
 }
 let SAMFR = {};    // stem → SAM 전파 프레임 시각 목록(/api/sam2frames). 목록 배지 = 손라벨 ∪ SAM = 학습데이터 수
 function labeledCount(clip) {
   if (clip.startsWith("img:")) return (IMGLABELS || []).some(r => r.clip === clip && r.cls >= 0) ? 1 : 0;   // 이미지 = 프레임 하나
   const by = {};   // fire(LABELS)·person(PLABELS) 어느 쪽 손라벨이든 그 클립의 프레임 수를 센다(0.5초 격자)
-  for (const S of [LABELS, PLABELS]) { if (S) S.filter(r => r.clip === clip && r.cls >= 0).forEach(r => { by[Math.round(r.t * 2) / 2] = 1; }); }
-  (SAMFR[clip] || []).forEach(t => { by[Math.round(t * 2) / 2] = 1; });
+  for (const S of [LABELS, PLABELS]) { if (S) S.filter(r => r.clip === clip && r.cls >= 0).forEach(r => { by[gridKey(r.t)] = 1; }); }
+  (SAMFR[clip] || []).forEach(t => { by[gridKey(t)] = 1; });
   return Object.keys(by).length;
 }
 
@@ -156,7 +158,7 @@ async function clipInfo(clip) {
 async function openFrameAt(clip, sec, mode) {
   if (LB.img) { LB.img = null; ED = null; }                 // 이미지 편집에서 영상으로 넘어오면 편집기를 새로 그린다
   if (sec != null && !isFinite(Number(sec))) sec = null;   // NaN 시각 방어(빈 입력·계산 오류) → 시작 프레임 자동 선택
-  LB.mode = mode || LB.mode || "fire";
+  LB.mode = mode || LB.mode || catMode("data/원본데이터/" + clip + ".mp4");   // 모드를 안 주면 그 클립 카테고리의 라벨 모드(규격 파일)
   if (ED && ED.clip === clip && ED.mode !== LB.mode) { ED = null; delete SAMST[clip]; }   // 라벨 모드(사람↔불연기)가 바뀌면 편집기를 새로 그린다: 객체 규약·버튼이 모드에 묶여 있다
   if (!ED || ED.clip !== clip) samInvalidate(clip);         // 클립을 새로 열면 SAM 저장소를 다시 읽는다(서버 큐가 그사이 저장했을 수 있다)
   if (LB.mode === "person" && !PLABELS) { try { PLABELS = await (await fetch("/api/labels?kind=person")).json(); } catch (e) { PLABELS = []; } }
@@ -224,6 +226,7 @@ const samCol = o => isFire() ? (FIRE.color[o] || FIRE.color[2]) : SAM_COLORS[(o 
 const samName = o => isFire() ? `객체 ${o} · ${FIRE.name[o] || FIRE.name[2]}` : `객체 ${o}`;
 const samCls = o => isFire() ? FIRE.cls(o) : 0;                                             // 객체 → 박스 클래스
 const objOfCls = c => isFire() ? FIRE.obj(c) : null;                                          // 박스 클래스 → 객체(화재만 정해진다)
+const clsColorFor = (mode, c) => mode === "fire" ? (FIRE.color[FIRE.obj(+c)] || FIRE.color[2]) : SAM_COLORS[(+c) % SAM_COLORS.length];   // 모드별 클래스 색(편집기 밖에서도 같은 규약)
 const SRC_COLOR = { hand: "#58a6ff", sam: "#e8913a", gt: "#79c0ff", none: "#3fb950" };   // 출처별 박스 색
 const MASK_FILL = () => isFire() ? "2e" : "";                                                // 화재: 불·연기 마스크를 반투명 층으로 겹쳐 보인다(사람은 윤곽선만)
 // 전파 방식은 실측 비교(화재 8클립) 결과 '객체별 분리 전파'가 가장 좋아 서버 기본값으로 고정했다. 화면에서 고르지 않는다.
