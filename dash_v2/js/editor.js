@@ -37,7 +37,7 @@ function existingBoxes(clip, t) {
   const S = _labelStore(); if (!S) return null;
   const rs = S.filter(r => r.clip === clip && Math.abs(Number(r.t) - t) < 0.25);
   if (!rs.length) return null;
-  return rs.filter(r => r.cls >= 0).map(r => [r.cls, r.x, r.y, r.w, r.h]);
+  return rs.filter(r => r.cls >= 0).map(r => r.obj != null ? [r.cls, r.x, r.y, r.w, r.h, +r.obj] : [r.cls, r.x, r.y, r.w, r.h]);   // 6번째 = 객체 번호(있을 때)
 }
 const hasHand = s => !!(s && s.length);                                                   // 손라벨 박스로 확정된 프레임인가
 // 그 클립에서 손라벨 박스가 있는 초 목록 [[초, 박스수], ...]
@@ -365,7 +365,7 @@ function renderEditor(f) {
     const col = SRC_COLOR[LB.src] || SRC_COLOR.none;
     LB.boxes.forEach((b, i) => {                     // 박스의 객체: 참조샷 → 전파 결과의 번호 → 화재면 클래스(불=1 연기=2). 있으면 객체 색 + 번호
       const q = seedForBox(i);
-      const obj = q ? q.obj : ((LB.src === "sam" && b[5]) ? b[5] : (isFire() ? objOfCls(b[0]) : (f.image ? i + 1 : null)));   // 사람 이미지: 박스 순서 = 객체 번호(전파가 없으니 번호는 표시용). 객체 줄 색과 맞춘다
+      const obj = q ? q.obj : (b[5] != null ? +b[5] : (isFire() ? objOfCls(b[0]) : (f.image ? i + 1 : null)));   // 6번째(객체 번호)는 전파·손라벨 어디서 왔든 같은 뜻   // 사람 이미지: 박스 순서 = 객체 번호(전파가 없으니 번호는 표시용). 객체 줄 색과 맞춘다
       s += rectSvg(b[1] * f.W, b[2] * f.H, b[3] * f.W, b[4] * f.H, obj ? samCol(obj) : col);
       if (obj && !q) { const bx = b[1] * f.W + 2, by = b[2] * f.H; s += `<text x="${bx}" y="${by >= 18 ? by - 4 : (b[2] + b[4]) * f.H + 16}" fill="${samCol(obj)}" font-size="16" font-weight="800">${obj}</text>`; }
     });
@@ -501,7 +501,7 @@ function renderEditor(f) {
     sd = null;
     if (!st) return; const p = toImg(ev);
     const x = Math.min(st.x, p.x), y = Math.min(st.y, p.y), w = Math.abs(p.x - st.x), h = Math.abs(p.y - st.y); st = null;
-    if (w > 4 && h > 4) { snap(); LB.boxes.push([curCls, x / f.W, y / f.H, w / f.W, h / f.H]); seedFromBox(LB.boxes.length - 1, true); }   // 새로 그린 박스 = 현재 객체 참조샷
+    if (w > 4 && h > 4) { snap(); LB.boxes.push([curCls, x / f.W, y / f.H, w / f.W, h / f.H, SM.cur]); seedFromBox(LB.boxes.length - 1, true); }   // 새로 그린 박스 = 현재 객체 참조샷
     draw(); saveNow();
   };
   ov.onmouseup = finish;
@@ -574,7 +574,7 @@ function renderEditor(f) {
     if (f.t !== t || gen !== _tapGen) return;         // 다른 프레임으로 갔거나 그사이 되돌리기 → 결과 버림
     if (!r.box) { SMASK = null; draw(); return; }
     SMASK = { box: r.box, poly: r.poly };
-    const nb = [samCls(SM.cur), r.box[0], r.box[1], r.box[2], r.box[3]];
+    const nb = [samCls(SM.cur), r.box[0], r.box[1], r.box[2], r.box[3], SM.cur];   // 6번째 = 객체 번호
     const sd0 = SM.seeds.find(q => near(q.t, t) && q.obj === SM.cur);
     let idx = (sd0 && sd0.i != null && LB.boxes[sd0.i]) ? sd0.i : ((hit && hit.i >= 0) ? hit.i : -1);
     if (idx >= 0) LB.boxes[idx] = nb; else { LB.boxes.push(nb); idx = LB.boxes.length - 1; }
@@ -584,7 +584,12 @@ function renderEditor(f) {
   }
   // ---------- SAM: 객체 줄 ----------
   function drawObjs() {
-    SM.objs = SM.objs.filter(o => o === 1 || o === SM.cur || isFire() || SM.seeds.some(q => q.obj === o));   // 참조샷 없는 번호는 정리
+    if (!isFire()) {                                 // 사람: 이 클립의 손라벨·전파·참조샷에 있는 객체 번호를 전부 목록에
+      const S0 = _labelStore() || [], present = new Set([1, SM.cur, ...SM.seeds.map(q => q.obj), ...LB.boxes.map(b => b[5]).filter(v => v != null).map(Number),
+        ...S0.filter(r => r.clip === f.stem && r.obj != null).map(r => +r.obj), ...Object.values(SAMMAP[f.clip] || {}).flatMap(v => Object.keys(v || {}).map(Number))]);
+      SM.objs = [...present].filter(o => o >= 1).sort((a, b) => a - b);
+    }
+    SM.objs = SM.objs.filter(o => o === 1 || o === SM.cur || isFire() || SM.seeds.some(q => q.obj === o) || LB.boxes.some(b => +b[5] === o) || Object.values(SAMMAP[f.clip] || {}).some(v => v && v[String(o)]) || (_labelStore() || []).some(r => r.clip === f.stem && +r.obj === o));   // 어디에도 없는 번호만 정리
     if (f.image && !isFire()) { const n = Math.max(1, LB.boxes.length); SM.objs = Array.from({ length: n }, (_, i) => i + 1); if (SM.cur > n) SM.cur = 1; }   // 사람 이미지: 박스마다 객체 하나(화면 번호·색과 일치)
     if (!SM.objs.length) SM.objs = objsFor();
     persistSam(f.clip);
@@ -597,12 +602,12 @@ function renderEditor(f) {
       tag.onclick = () => { SM.cur = o; loadSam(); };
       row.appendChild(tag);
       if (f.image) {                                 // 이미지: 이 객체의 박스 수(정답 프리필 포함). 없으면 비워 둔다
-        const n = LB.boxes.filter((b, i) => (isFire() ? objOfCls(b[0]) : i + 1) === o).length;
+        const n = LB.boxes.filter((b, i) => (b[5] != null ? +b[5] : (isFire() ? objOfCls(b[0]) : i + 1)) === o).length;
         if (n) { const c = el("span", null, `${n}박스`); c.style.cssText = "font-size:11px;color:var(--mut)"; row.appendChild(c); }
       }
       if (!f.image) {                                // 이 객체의 라벨 프레임을 칩으로(손라벨·전파 구분 없음). 참조샷 칩만 초록 점 + ×(참조샷 취소). 이미지엔 프레임이 없다
         const S = _labelStore() || [];
-        const hand = isFire() ? S.filter(r => r.clip === f.stem && r.cls === samCls(o)).map(r => quant(r.t)) : [];   // 사람 손라벨 박스엔 객체 번호가 없어 전파 결과·참조샷만
+        const hand = S.filter(r => r.clip === f.stem && r.cls >= 0 && (r.obj != null ? +r.obj === o : (isFire() && r.cls === samCls(o)))).map(r => quant(r.t));   // 손라벨의 객체 번호(obj) 우선, 없으면 화재는 클래스로
         const sam = Object.entries(SAMMAP[f.clip] || {}).filter(([k, v]) => v && v[String(o)]).map(([k]) => +k);
         const seedAt = t => SM.seeds.find(sd => sd.obj === o && near(sd.t, t));
         const all = [...new Set([...hand, ...sam, ...SM.seeds.filter(sd => sd.obj === o).map(sd => sd.t)])].sort((x, y) => x - y);
@@ -1194,7 +1199,7 @@ function buildFrameBar(f, status) {
 async function postLabel(clip, t, W, H, boxes, src, clear) {
   const kind = LB.img ? "image" : ((LB.mode === "person") ? "person" : "fire");
   const evalCat = (typeof isScoringCat === "function") && isScoringCat((src || "").split("/")[2] || (LB.img || "").split("/")[2] || "");   // 채점 전용 카테고리 → eval 표시
-  const res = await postJSON("/api/savelabel", { clip, t, src, file: LB.img || `${clip}_${String(t).padStart(4, "0")}.png`, W, H, boxes: boxes.map(b => b.slice(0, 5)), kind, clear: !!clear, eval: !!evalCat });   // 6번째(객체 번호)는 화면용
+  const res = await postJSON("/api/savelabel", { clip, t, src, file: LB.img || `${clip}_${String(t).padStart(4, "0")}.png`, W, H, boxes: boxes.map(b => b.slice(0, 6)), kind, clear: !!clear, eval: !!evalCat });   // 6번째 = 객체 번호(전파 박스를 손으로 고쳐도 객체 유지)
   if (!res.ok) throw new Error(res.err || "저장 실패");
   if (kind === "image") IMGLABELS = res.labels || IMGLABELS; else if (kind === "person") PLABELS = res.labels || PLABELS; else LABELS = res.labels || LABELS;
   return res;

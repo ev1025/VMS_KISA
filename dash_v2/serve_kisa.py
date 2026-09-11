@@ -1293,11 +1293,12 @@ class H(BaseHTTPRequestHandler):
                 src = str(body.get("src") or "").replace("\\", "/") or None
                 ev = {"eval": True} if body.get("eval") else {}        # 채점 전용 카테고리(검증·채점·배포)의 라벨: 학습셋 빌더가 뺀다
                 for b in body.get("boxes", []):
-                    cls, x, y, w, h = b
+                    cls, x, y, w, h = b[:5]
+                    obj = int(b[5]) if len(b) > 5 and b[5] is not None else None   # 객체 번호(전파 박스를 손라벨로 고쳐도 정체성 유지). 없으면 안 쓴다
                     rows.append({"file": file, "clip": clip, "src": src, "t": t, "cls": int(cls),
                                  "x": round(float(x), 5), "y": round(float(y), 5),
                                  "w": round(float(w), 5), "h": round(float(h), 5),
-                                 "W": W, "H": Hh, "crop": [0, 0, W, Hh], **ev})
+                                 "W": W, "H": Hh, "crop": [0, 0, W, Hh], **ev, **({"obj": obj} if obj is not None else {})})
                 if not body.get("boxes") and not body.get("clear"):
                     # 박스 0개로 저장(사람이 다 지움) = '검토했고 객체 없음' 마커(사람·화재 공통). 이래야 다시 DINO 프리필 안 된다. clear=true 면 기록만 지운다(되돌리기)
                     rows.append({"file": file, "clip": clip, "src": src, "t": t, "cls": -1,
