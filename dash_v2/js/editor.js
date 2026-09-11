@@ -365,7 +365,7 @@ function renderEditor(f) {
     const col = SRC_COLOR[LB.src] || SRC_COLOR.none;
     LB.boxes.forEach((b, i) => {                     // 박스의 객체: 참조샷 → 전파 결과의 번호 → 화재면 클래스(불=1 연기=2). 있으면 객체 색 + 번호
       const q = seedForBox(i);
-      const obj = q ? q.obj : ((LB.src === "sam" && b[5]) ? b[5] : (isFire() ? objOfCls(b[0]) : null));
+      const obj = q ? q.obj : ((LB.src === "sam" && b[5]) ? b[5] : (isFire() ? objOfCls(b[0]) : (f.image ? i + 1 : null)));   // 사람 이미지: 박스 순서 = 객체 번호(전파가 없으니 번호는 표시용). 객체 줄 색과 맞춘다
       s += rectSvg(b[1] * f.W, b[2] * f.H, b[3] * f.W, b[4] * f.H, obj ? samCol(obj) : col);
       if (obj && !q) { const bx = b[1] * f.W + 2, by = b[2] * f.H; s += `<text x="${bx}" y="${by >= 18 ? by - 4 : (b[2] + b[4]) * f.H + 16}" fill="${samCol(obj)}" font-size="16" font-weight="800">${obj}</text>`; }
     });
@@ -593,6 +593,7 @@ function renderEditor(f) {
   // ---------- SAM: 객체 줄 ----------
   function drawObjs() {
     SM.objs = SM.objs.filter(o => o === 1 || o === SM.cur || isFire() || SM.seeds.some(q => q.obj === o));   // 참조샷 없는 번호는 정리
+    if (f.image && !isFire()) { const n = Math.max(1, LB.boxes.length); SM.objs = Array.from({ length: n }, (_, i) => i + 1); if (SM.cur > n) SM.cur = 1; }   // 사람 이미지: 박스마다 객체 하나(화면 번호·색과 일치)
     if (!SM.objs.length) SM.objs = objsFor();
     persistSam(f.clip);
     rowObj.innerHTML = "";
@@ -604,7 +605,7 @@ function renderEditor(f) {
       tag.onclick = () => { SM.cur = o; loadSam(); };
       row.appendChild(tag);
       if (f.image) {                                 // 이미지: 이 객체의 박스 수(정답 프리필 포함). 없으면 비워 둔다
-        const n = LB.boxes.filter(b => (isFire() ? objOfCls(b[0]) : 1) === o).length;
+        const n = LB.boxes.filter((b, i) => (isFire() ? objOfCls(b[0]) : i + 1) === o).length;
         if (n) { const c = el("span", null, `${n}박스`); c.style.cssText = "font-size:11px;color:var(--mut)"; row.appendChild(c); }
       }
       if (!f.image) {                                // 이 객체의 라벨 프레임을 칩으로(손라벨·전파 구분 없음). 참조샷 칩만 초록 점 + ×(참조샷 취소). 이미지엔 프레임이 없다
