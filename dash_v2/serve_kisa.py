@@ -981,6 +981,7 @@ def prop_job_start(clip, seeds, a, b, step, mode=None):
         st = _PROP_JOBS[jid] = {"id": jid, "clip": Path(clip).stem, "clip_full": clip, "seeds": seeds, "a": a, "b": b, "step": step, "mode": mode,
                                 "done": 0, "total": 0, "running": True, "state": "queued", "nframes": 0, "err": None, "sec": 0, "saved": False}
         _PROP_Q.append(jid)
+        print(f"[전파 시작] {Path(clip).stem} 구간 {a}~{b} step {step} 참조샷 {sorted({round(float(q.get('t',0)),1) for q in seeds})}", flush=True)   # dash.log 에 남긴다
         if _PROP_WORKER[0] is None or not _PROP_WORKER[0].is_alive():
             _PROP_WORKER[0] = threading.Thread(target=_prop_worker, daemon=True)
             _PROP_WORKER[0].start()
@@ -998,7 +999,8 @@ def prop_jobs_view(stem=None):
         out.append({"id": jid, "clip": st.get("clip"), "state": st.get("state", "done" if not st.get("running") else "running"),
                     "pos": (q.index(jid) + 1) if jid in q else 0, "done": st.get("done", 0), "total": st.get("total", 0),
                     "err": st.get("err"), "saved": st.get("saved", False), "sec": st.get("sec", 0), "nframes": st.get("nframes", 0), "mode": st.get("mode"),
-                    "drops": st.get("drops") or {}})
+                    "drops": st.get("drops") or {}, "a": st.get("a"), "b": st.get("b"), "step": st.get("step"),
+                    "seed_ts": sorted({round(float(q.get("t", 0)), 1) for q in (st.get("seeds") or [])})})   # 어느 구간·어느 참조샷으로 돌았는지(사후 확인용)
     return out
 
 

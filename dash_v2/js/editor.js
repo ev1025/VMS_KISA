@@ -867,8 +867,15 @@ function renderEditor(f) {
       const ts = SM.seeds.map(q => q.t);
       a = Math.min(SM.a, Math.min.apply(null, ts)); b = Math.max(SM.b, Math.max.apply(null, ts));
     }
+    if (!refine && hasProp()) {                       // 결과가 있는데 지금 프레임에 참조샷이 없다 → 전체 범위를 다시 돌게 된다. 실수 방지
+      const ok = await uiConfirm(`지금 프레임(${_disp(f.t)})에 참조샷이 없어 '이어서'가 아니라 전체 범위를 다시 전파합니다.
+구간 ${_disp(a)}~${_disp(b)} · 참조샷 ${SM.seeds.map(q => _disp(q.t)).join(", ")}
+이 프레임부터 이어서 하려면 취소 후 탭·박스·C 로 참조샷을 만드세요. 계속할까요?`, { ok: "전체 다시 전파", danger: true });
+      if (!ok) return;
+    }
     fillShots();
     bGo.disabled = true; pstat.innerHTML = spin(0);
+    flash(`<span style="color:var(--mut)">전파 ${_disp(a)}~${_disp(b)} 시작</span>`, 3000);
     const seeds = SM.seeds.map(q => ({ t: q.t, box: q.box, obj: q.obj, pts: q.pts || [] }));
     const start = await postJSON("/api/sam2_propagate_start", { clip: f.clip, seeds, a, b, step: _step() }).catch(() => ({ err: "요청 실패" }));
     if (start.err) { bGo.disabled = false; flash(`<b style="color:#f85149">${start.err}</b>`, 3000); return; }
