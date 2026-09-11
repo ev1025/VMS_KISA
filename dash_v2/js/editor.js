@@ -527,12 +527,13 @@ function renderEditor(f) {
     here.forEach(q => { const v = iou4(q.box, box4(b)); if (v > bi) { bi = v; best = q; } });
     return best || here.find(q => q.i === i) || null;
   };
+  const clipPoly = (poly, box) => (poly || []).map(p => [Math.min(Math.max(p[0], box[0]), box[0] + box[2]), Math.min(Math.max(p[1], box[1]), box[1] + box[3])]);   // 마스크 윤곽선을 박스 안으로 자른다(박스를 줄이면 마스크도 그만큼 줄어 보인다)
   const seedFromBox = (i, create) => {               // 박스의 참조샷 동기화. create=true(새 박스 드래그)면 참조샷이 없을 때 현재 객체 것으로 만든다.
     const b = LB.boxes[i]; if (!b) return;             // 옮기기·크기조절(create=false)은 '고치기'라 참조샷을 새로 만들지 않는다(전파 결과를 다듬을 때 칩이 쌓이지 않게)
     if (isFire() && b[0] === 1) { SMASK = null; return; }   // 연기 박스는 참조샷을 만들지 않는다(전파 대상 아님)
     const box = box4(b);
     const owner = seedForBox(i);
-    if (owner) { owner.box = box; owner.i = i; if (owner.obj === SM.cur) SMASK = { box, poly: owner.poly || [] }; drawObjs(); }   // 윤곽선(poly)은 유지
+    if (owner) { owner.poly = clipPoly(owner.poly, box); owner.box = box; owner.i = i; if (owner.obj === SM.cur) SMASK = { box, poly: owner.poly }; drawObjs(); }   // 박스를 옮기거나 줄이면 마스크도 박스 안으로 잘라 따라가게
     else if (create) { SMASK = { box, poly: [] }; seedSet(box, [], SP, i); }
     draw();
   };
