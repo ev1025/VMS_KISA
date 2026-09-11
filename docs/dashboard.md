@@ -2,6 +2,17 @@
 
 서버 `dash_v2/serve_kisa.py`(http.server, 포트 8890) + 브라우저 `dash_v2/js/*.js`(core → review → data → editor → main). 2026-09-10 리팩토링 기준.
 
+## 데이터 규격 (2026-09-11) — 데이터셋별 하드코딩 금지
+
+기준 파일 `configs/datasets.yaml`(git 관리, `data/학습데이터/datasets.yaml` 은 심링크) 하나가 원본 카테고리마다 `mode`(fire|person|none) · `media`(video|image) · `gt`(원본 정답 형식) · `classes`(원본 클래스 → 우리 클래스) · `use`(train|eval|none) 를 정한다.
+코드는 **형식별 어댑터**(`dash_v2/gt_adapters.py`: yolo_txt · coco_json · voc_xml · kisa_xml · aihub171_xml · aihub_json · aihub71953_json)만 갖고, 새 데이터셋은 yaml 한 줄로 끝난다.
+
+- 우리 클래스 규약(고정): fire 모드 0 불 · 1 연기 / person 모드 0 사람. 원본이 다르면 `classes` 로 뒤집거나 버린다(dfire 0↔1, azimjaan 구름 drop).
+- 대시보드 `라벨 모드 → 적용` = yaml 의 `mode` 를 바꾼다(`POST /api/datasets`). `GET /api/datasets` 가 전체 규격, `/api/rawlabel` 은 어댑터를 거친 우리 규약의 YOLO 줄을 준다.
+- 원본 정답은 읽기만. 정답이 있는 항목을 열면 정답 박스가 **편집 가능한 라벨**로 뜨고(src gt), 고친 프레임만 손라벨 저장소에 남는다. 이미지는 `image_labels.json`(클립 이름 `img:<상대경로>`).
+- `use: eval`(채점 전용)에서 만든 라벨 행은 `eval: true` 가 붙어 학습셋 빌더가 뺀다. `use: none` 은 라이선스(LLVIP·FLIR) 등으로 학습 금지.
+- 학습셋 빌더 `scripts/build_trainset.py fire|person`: 손라벨 > SAM 전파 > 원본 정답(어댑터) 순으로 합쳐 `trainset_<mode>_<날짜>/` 를 만든다. 영상은 라벨된 시각 프레임을 뽑고, 이미지는 심링크. 검증은 클립/파일 해시로 분리.
+
 ## 라벨 저장소 셋 (표시·학습 우선순위 순)
 
 | 저장소 | 파일 | 만드는 곳 | 뜻 |

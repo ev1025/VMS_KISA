@@ -33,8 +33,19 @@ def log(msg):
         f.write(line + "\n")
 
 
+# 데이터셋 탐색 우선순위: 960 사본 > NVMe 미러 > 원본(Lustre)
+# 병목은 저장소가 아니라 JPEG 디코딩이다(실측 8워커: 원본 1920 = 261장/초, 960 사본 = 727장/초, 읽기만 하면 1,500장/초).
+# 960 = 지금 레시피의 multi_scale 상한(imgsz 640 × 1.5)이라 학습이 쓰는 어떤 크기에서도 화질 손실이 없다.
+R960 = Path("/NHNHOME/vms_r960")          # _kisa_port/make_r960.py
+MIRROR = Path("/NHNHOME/vms_mirror")      # _kisa_port/mirror_to_nvme.py (읽기 속도는 Lustre 와 거의 같다. 보험용)
+
+
 def find_dataset(name):
     for root in (TRAIN_DS, RAW_DS):
+        for base, mark in ((R960, ".r960_ok"), (MIRROR, ".mirror_ok")):
+            d = base / "data" / root.name / name
+            if (d / mark).is_file():                    # 변환·복사가 끝난 것만 쓴다
+                return d
         d = root / name
         if d.is_dir():
             return d
@@ -85,6 +96,48 @@ def best_pt(exp):
     cands = [V / "runs" / exp["name"] / exp["model"] / "weights/best.pt",
              V / "runs" / exp["name"] / "weights/best.pt"]
     return next((p for p in cands if p.is_file()), None)
+
+
+def _pdeathsig():
+    """자식이 이 함수를 실행한 뒤 exec 한다. 부모가 죽는 순간 커널이 자식에게 SIGTERM 을 보낸다(PR_SET_PDEATHSIG).
+    러너가 OOM 킬러에 -9 로 즉사해도 학습 프로세스가 고아로 남아 RAM·GPU 를 쥐고 있는 일을 막는다."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, 15)      # PR_SET_PDEATHSIG=1, SIGTERM=15
+    except Exception:
+        pass
+
+
+def kill_orphan_trainers():
+    """부모가 없는(PPID 1) 학습 프로세스를 정리한다. 러너가 죽고 자식만 남은 경우가 여기 걸린다.
+    부모가 살아 있는(다른 러너가 돌리는) 프로세스는 건드리지 않는다."""
+    killed = []
+    try:
+        out = subprocess.run(["ps", "-eo", "pid,ppid,args"], capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return killed
+    for line in out.splitlines()[1:]:
+        f = line.split(None, 2)
+        if len(f) < 3 or "model.py train" not in f[2] and "resume_train.py" not in f[2]:
+            continue
+        if f[1] != "1":                            # 부모가 살아 있으면 정상 잡
+            continue
+        try:
+            os.kill(int(f[0]), 9); killed.append(f[0])
+        except Exception:
+            pass
+    if killed:
+        log(f"고아 학습 프로세스 {len(killed)}개 정리(PID {' '.join(killed)})")
+        time.sleep(5)
+    return killed
+
+
+def free_gb():
+    try:
+        import psutil
+        return psutil.virtual_memory().available / 2 ** 30
+    except Exception:
+        return 1e9                                  # psutil 이 없으면 게이트를 걸지 않는다
 
 
 def is_done(exp):
@@ -149,12 +202,41 @@ def run_one(exp, defaults):
     try:
         pt = best_pt(exp)
         n_train = None
-        if pt is None:
+        last_pt = V / "runs" / name / exp["model"] / "weights" / "last.pt"
+        unfinished = False
+        if last_pt.is_file() and (EXP_DIR / name / "data.yaml").is_file():
+            try:                                          # 마지막 에폭 < 목표 에폭 = 중단된 학습(끝난 학습은 epoch=-1 로 저장됨)
+                import torch
+                ck = torch.load(str(last_pt), map_location="cpu", weights_only=False)
+                ep = int(ck.get("epoch", -1)); tgt = int((ck.get("train_args") or {}).get("epochs", 0))
+                unfinished = ep >= 0 and ep + 1 < tgt
+                del ck
+            except Exception as e:
+                log(f"{name} last.pt 확인 실패: {e!r}")
+        if unfinished:
+            pt = None                                     # 중간 best.pt 로 완료 처리하지 않는다
+        if pt is None and last_pt.is_file() and unfinished:
+            # 중단된 학습 → last.pt 에서 이어간다(에폭 유지). 캐시/워커는 큐 설정을 따른다
+            a_ = dict(defaults.get("train", {}), **exp.get("train", {}))
+            cache = a_.get("cache", "ram")
+            n_lines = sum(1 for _ in open(EXP_DIR / name / "train.txt", encoding="utf-8")) if (EXP_DIR / name / "train.txt").is_file() else 0
+            if cache == "ram" and n_lines > int(defaults.get("ram_cache_max", 60000)):
+                cache = False
+            log(f"{name} 이어서 학습(last.pt, {n_lines}장, cache={cache}, workers={a_.get('workers', 8)})")
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(LOG_DIR / f"{name}.log", "a", encoding="utf-8") as lf:
+                rc = subprocess.run([str(PY), str(V / "scripts/resume_train.py"), str(last_pt), "--cache", str(cache), "--workers", str(a_.get("workers", 8))],
+                                    cwd=V, stdout=lf, stderr=subprocess.STDOUT, preexec_fn=_pdeathsig, env=dict(os.environ, CUDA_VISIBLE_DEVICES="0")).returncode
+            pt = best_pt(exp)
+            if rc != 0 or pt is None:
+                log(f"{name} 이어서 학습 실패 rc={rc}{' (SIGKILL: OOM 의심 → 캐시/동시잡 확인)' if rc == -9 else ''} (logs/queue/{name}.log)")
+                write_meta(exp, defaults, n_lines, pt, started, "train_failed"); return
+        elif pt is None:
             d, n_train = build_lists(exp, defaults)
             log(f"{name} 학습 시작 ({exp['model']}, {n_train}장, +{exp.get('extras', [])}, extra={exp.get('extra', {})})")
             LOG_DIR.mkdir(parents=True, exist_ok=True)
             with open(LOG_DIR / f"{name}.log", "a", encoding="utf-8") as lf:
-                rc = subprocess.run(train_cmd(exp, defaults, d / "data.yaml", n_train), cwd=V, stdout=lf, stderr=subprocess.STDOUT,
+                rc = subprocess.run(train_cmd(exp, defaults, d / "data.yaml", n_train), cwd=V, stdout=lf, stderr=subprocess.STDOUT, preexec_fn=_pdeathsig,
                                     env=dict(os.environ, CUDA_VISIBLE_DEVICES="0")).returncode
             pt = best_pt(exp)
             if rc != 0 or pt is None:
@@ -191,17 +273,23 @@ def cmd_run(a):
     if a.rebuild_human:
         log("human_fire 재빌드(손라벨 최신화)")
         subprocess.run([str(PY), str(V / "scripts/build_humanset.py")], cwd=V)
+    kill_orphan_trainers()             # 지난 러너가 SIGKILL 로 죽어 남은 학습 프로세스부터 치운다
     todo = [e for e in exps if not is_done(e)]
     log(f"큐 {a.queue}: 총 {len(exps)}개, 남은 {len(todo)}개, 동시 {a.jobs}잡")
     running = []                       # (proc, exp)
     vram_gate = int(defaults.get("vram_gate_mib", 120000))
+    min_free = float(defaults.get("min_free_gb", 300))   # 컨테이너 메모리 한도를 안에서 못 읽으니 가용 RAM 으로 대신 막는다
+    warned = 0
     while todo or running:
         running = [(p, e) for p, e in running if p.poll() is None]
-        if todo and len(running) < a.jobs and gpu_used_mib() < vram_gate:
+        gb = free_gb()
+        if todo and len(running) < a.jobs and gpu_used_mib() < vram_gate and gb >= min_free:
             e = todo.pop(0)
-            p = subprocess.Popen([sys.executable, __file__, "_one", a.queue, e["name"]], cwd=V)
+            p = subprocess.Popen([sys.executable, __file__, "_one", a.queue, e["name"]], cwd=V, preexec_fn=_pdeathsig)
             running.append((p, e)); time.sleep(int(defaults.get("stagger_sec", 90)))
         else:
+            if todo and len(running) < a.jobs and gb < min_free and time.time() - warned > 600:
+                warned = time.time(); log(f"가용 RAM {gb:.0f}GB < {min_free:.0f}GB → 새 잡 대기")
             time.sleep(30)
     log("QUEUE DONE")
 

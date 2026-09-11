@@ -15,8 +15,7 @@ async function buildDatasetSrc() {
   kb.hidden = false;
   kb.style.cssText = "display:flex;gap:4px;margin-bottom:6px";
   kb.innerHTML = "";
-  DS_KIND = "raw";                                  // 학습 데이터(의사라벨 세트) 탭은 뺐다. 원본만 본다
-  [["raw", "원본 데이터"]].forEach(([k, label]) => {
+  [["raw", "원본 데이터"], ["ds", "학습 데이터"]].forEach(([k, label]) => {
     const b = el("button", null, label);
     const on = DS_KIND === k;
     b.style.cssText = "flex:1;border-radius:6px;padding:5px;cursor:pointer;font-size:11px;font-weight:700;" +
@@ -102,10 +101,10 @@ async function renderRawList(cat) {
       const it = el("div", "item");
       const nm = el("span", "nm", rel.split("/").pop()); nm.title = rel; nm.style.userSelect = "text"; nm.style.cursor = "text";
       it.appendChild(nm);
-      it.onclick = () => { if (window.getSelection && String(window.getSelection())) return; openImage(rel); };
+      it.onclick = () => { if (window.getSelection && String(window.getSelection())) return; showRawImage(rel); };
       box.appendChild(it);
     });
-    openImage(r.images[0]);
+    showRawImage(r.images[0]);
   }
   if (r.videos.length) {
     r.videos.forEach(rel => {
@@ -172,35 +171,13 @@ async function showRawImage(rel) {
     v.style.cssText = "font-family:ui-monospace,Menlo,monospace;font-size:11px;word-break:break-all;line-height:1.45";
     d.appendChild(t); d.appendChild(v); return d;
   };
-  imageRightPanel(rel, false, boxes.length);
-}
-// 이미지 항목 열기: 라벨 모드가 '편집 안 함'이 아니면 편집기(기본), 아니면 보기
-function openImage(rel) {
-  saveSession({ img: rel, rel: null });
-  if (catMode(rel) !== "none") openImageEdit(rel); else showRawImage(rel);
-}
-// 이미지 우측 패널: 정보(파일·경로·정답 수) → 라벨 편집/사진 보기 → 라벨 모드
-function imageRightPanel(rel, editing, nGT) {
-  const r = $("#right"); r.innerHTML = "";
-  r.appendChild(el("div", "rtitle", "이미지 정보"));
-  const KV = (k, val) => { const dv = el("div", "kv"); dv.appendChild(el("span", "", k)); dv.appendChild(el("b", "", val)); return dv; };
-  const KVstack = (k, val) => { const d = el("div"); d.style.cssText = "padding:6px 0;border-bottom:1px solid var(--line)"; const t = el("div", "", k); t.style.cssText = "color:var(--mut);font-size:11px;margin-bottom:2px"; const v = el("div", "", val); v.style.cssText = "font-family:ui-monospace,Menlo,monospace;font-size:11px;word-break:break-all;line-height:1.45"; d.appendChild(t); d.appendChild(v); return d; };
   r.appendChild(KVstack("파일", rel.split("/").pop()));
   r.appendChild(KVstack("경로", rel.replace(/\/[^/]+$/, "")));
-  r.appendChild(KV("정답(원본)", nGT ? nGT + "박스" : "없음"));
-  const _n = (typeof IMGLABELS !== "undefined" && IMGLABELS) ? IMGLABELS.filter(x => x.clip === "img:" + rel && x.cls >= 0).length : 0;
-  r.appendChild(KV("손라벨", _n ? _n + "박스" : "없음"));
-  if (isScoringCat(catOf(rel))) r.appendChild(KV("주의", "채점 전용 · 라벨해도 학습셋 제외"));
-  const eb = el("button", null, editing ? "\u25B6 사진 보기" : "라벨 편집");
-  eb.style.cssText = "width:100%;margin-top:10px;padding:8px;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px;" +
-    (editing ? "background:var(--panel2);color:var(--tx);border:1px solid var(--blue)" : "background:var(--blue);color:#06090f;border:1px solid var(--blue)");
-  eb.onclick = () => { if (editing) { LB.img = null; ED = null; showRawImage(rel); } else openImageEdit(rel); };
-  r.appendChild(eb);
-  r.appendChild(catModeRow(rel, () => openImage(rel)));
+  r.appendChild(KV("라벨(기존 GT)", boxes.length ? boxes.length + "박스" : "없음"));
 }
 
 // 카테고리(데이터셋)별 라벨 모드. 사용자가 고른 값(서버 catmode.json)이 이름 규칙보다 우선한다.
-let DATASETS = {};                                 // 데이터 규격(datasets.yaml): {카테고리: {mode, media, gt, classes, use, note}} main.js boot 에서 받는다
+let CATMODE = {};                                  // {카테고리: "fire"|"person"|"none"} main.js boot 에서 서버에서 받는다
 function catOf(rel) { return (rel || "").split("/")[2] || ""; }
 function isScoringCat(cat) { return /검증|채점|배포/.test(cat); }   // 채점 전용: 라벨해도 학습셋엔 안 들어간다(행에 eval 표시)
 function catModeAuto(cat) {                        // 이름으로 짐작하는 기본값(사용자가 안 고른 경우)
@@ -208,12 +185,12 @@ function catModeAuto(cat) {                        // 이름으로 짐작하는 
   return "fire";                                   // 나머지는 불·연기로 연다. 다르면 사용자가 바꾼다
 }
 function catMode(rel) {
-  const v = (DATASETS[catOf(rel)] || {}).mode;
+  const v = CATMODE[catOf(rel)];
   return (v === "fire" || v === "person" || v === "none") ? v : catModeAuto(catOf(rel));
 }
-async function setCatMode(cat, mode) {             // datasets.yaml 의 mode 를 바꾼다(서버 저장, 브라우저 무관)
-  DATASETS[cat] = Object.assign(DATASETS[cat] || {}, { mode });
-  try { await fetch("/api/datasets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cat, mode }) }); } catch (e) {}
+async function setCatMode(cat, mode) {             // 서버에 저장(브라우저가 바뀌어도 유지)
+  CATMODE[cat] = mode;
+  try { await fetch("/api/catmode", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cat, mode }) }); } catch (e) {}
 }
 // 우측 패널의 모드 선택 줄: [불·연기 v] [적용]. 적용하면 그 데이터셋 전체에 고정된다.
 function catModeRow(rel, onApply) {

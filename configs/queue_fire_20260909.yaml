@@ -4,9 +4,11 @@ defaults:
   base: aihub71751_48k          # 48k 평면풀(12프레임)
   oversample: { human_fire: 5 } # 손라벨 ×5 (목록 반복)
   val_small: 600
-  train: { epochs: 80, batch: 128, imgsz: 640, multi_scale: 0.5, cache: ram, workers: 8 }
-  vram_gate_mib: 120000
-  stagger_sec: 90
+  train: { epochs: 80, batch: 128, imgsz: 640, multi_scale: 0.5, cache: ram, workers: 16 }   # 워커 8개는 각 24%만 쓰고 놀았다(CPU 72코어 중 15코어만 사용, iowait 0) = 파일 열기 지연 대기. 워커를 늘려 대기를 겹친다
+  vram_gate_mib: 100000
+  min_free_gb: 300           # 가용 RAM 이 이보다 적으면 새 잡을 안 띄운다(컨테이너 한도는 안에서 못 읽는다)
+  ram_cache_max: 60000         # 컨테이너 메모리 한도(안에서 안 읽힘)에 걸려 300k 캐시 잡이 전부 SIGKILL(2026-09-10). 60k(≈40GB/잡)×2잡은 완주 확인된 값
+  stagger_sec: 900             # 두 번째 잡은 15분 뒤(데이터셋 초기화·RAM 캐시 적재가 Lustre 에서 겹치지 않게)
 
 experiments:
   # --- 이미 구 큐로 완료/진행: base(완료), fasdd(진행중) → 결과 있으면 건너뜀 ---
@@ -15,9 +17,9 @@ experiments:
   # --- 데이터 애블레이션 (48k base) ---
   - { name: fresh_48k_snowfull_20260909, model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo] }
   - { name: fresh_48k_full_20260909,     model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_fog_neg] }
-  - { name: fresh_48k_m_20260909,        model: yolo11m, extras: [fasdd_snowfog, fasdd_yolo] }
   - { name: fresh_48k_wildpos_20260909,  model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo] }
   - { name: fresh_48k_wildall_20260909,  model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo, wildfire_fog_neg] }
+  - { name: fresh_48k_m_20260909,        model: yolo11m, extras: [fasdd_snowfog, fasdd_yolo] }
   - { name: fresh_48k_azimjaan_20260909, model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo] }
   # --- 24k vs 48k 데이터량 비교 (BASE 만 교체) ---
   - { name: fresh_24k_base_20260909,     model: yolo11s, base: aihub71751_24k, extras: [] }

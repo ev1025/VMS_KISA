@@ -1,0 +1,32 @@
+# 데이터 규격(단일 기준 파일, git 관리: configs/datasets.yaml · data/학습데이터/datasets.yaml 은 심링크). 원본데이터/<카테고리> 마다 한 항목. 코드는 이 파일만 보고 움직인다 — 데이터셋별 하드코딩 금지.
+#
+# 우리 클래스 규약(고정):  fire 모드 = 0 불 · 1 연기       person 모드 = 0 사람
+#
+# 항목 필드
+#   mode:    fire | person | none      무엇을 라벨하나(대시보드 라벨 편집 규약). 대시보드 '라벨 모드 → 적용' 이 이 값을 바꾼다
+#   media:   video | image              원본 매체
+#   gt:      원본 정답 형식. none | yolo_txt | coco_json | voc_xml | kisa_xml | aihub171_xml | aihub_json | aihub71953_json
+#            (없으면 서버가 파일을 훑어 자동 판별)
+#   classes: 원본 클래스 → 우리 클래스. 키는 원본 id(yolo) 또는 이름(coco/voc). 값은 0/1 또는 drop. 없으면 이름으로 자동(fire/flame→0, smoke→1, person→0)
+#   use:     train | eval | none        학습셋에 넣나(train) · 채점/검증만(eval, 학습 누수 금지) · 안 씀(none: 라이선스 등)
+#   note:    사람이 읽는 메모
+#
+# 정답 원본은 어떤 경우에도 쓰지 않는다. 대시보드는 정답을 편집 가능한 라벨로 띄우고, 고친 것만 손라벨 저장소에 남긴다.
+# 학습셋 빌더(scripts/build_trainset.py)는 손라벨 > SAM 전파 > 원본 정답(어댑터+classes) 순으로 합친다.
+
+aihub171_이상행동:      { mode: person, media: video, gt: aihub171_xml, use: train, note: "객체별 키프레임 점(박스 없음) + 행동 구간" }
+aihub71330_산불:        { mode: fire,   media: image, gt: yolo_txt, classes: { 0: 0, 1: 1 }, use: train, note: "frames/=양성(0 불·1 연기) · 안개구름/=음성(빈 txt)" }
+aihub71751_48k:         { mode: fire,   media: image, gt: yolo_txt, classes: { 0: 0, 1: 1 }, use: train, note: "12프레임 평면풀 39,003장. 방화 큐 베이스" }
+aihub71953_다각도:      { mode: person, media: video, gt: aihub71953_json, use: train, note: "이벤트 폴더 JSON 의 evidence 키프레임 박스 + 설명문. 배회 2·침입 2 시나리오만 받음" }
+aihub_침입쓰러짐영상:   { mode: person, media: video, gt: aihub_json, use: train, note: "event_frame 구간만(박스 없음)" }
+kisa_배포_검증영상:     { mode: fire,   media: video, gt: kisa_xml, use: eval, note: "채점 전용(4항목 배포 표본). 라벨은 mAP 계산용, 학습셋 제외. 사람 항목 클립은 라벨 모드를 person 으로" }
+kisa_산불_정지이미지:   { mode: fire,   media: image, gt: none, use: train, note: "합성 9,500장, 정답 없음 → 대시보드에서 라벨" }
+kisa_산불_합성영상:     { mode: fire,   media: video, gt: none, use: train, note: "합성 영상, 정답 없음" }
+kisa_연구개발_방화영상: { mode: fire,   media: video, gt: kisa_xml, use: train, note: "Alarm StartTime/Duration 만(박스 없음). 손라벨 human_fire 의 원본" }
+kisa_연구개발_사람영상: { mode: person, media: video, gt: kisa_xml, use: train, note: "침입·배회·쓰러짐 825편. Alarm 시각만" }
+open_azimjaan_fire:     { mode: fire,   media: image, gt: yolo_txt, classes: { 0: drop, 1: 0, 2: 1 }, use: train, note: "원본 0=구름(버림) 1=불 2=연기" }
+open_datacluster_fire:  { mode: fire,   media: image, gt: voc_xml, classes: { fire: 0, smoke: 1 }, use: train, note: "VOC xml, Annotations/ 트리" }
+open_dfire:             { mode: fire,   media: image, gt: yolo_txt, classes: { 0: 1, 1: 0 }, use: train, note: "원본 0=smoke 1=fire → 뒤집는다" }
+open_fasdd:             { mode: fire,   media: image, gt: coco_json, classes: { fire: 0, smoke: 1 }, use: train, note: "annotations/<split>.json (COCO)" }
+open_flir:              { mode: person, media: image, gt: coco_json, use: none, note: "FLIR ADAS v2, 라이선스 불명 → 학습 사용 안 함" }
+open_llvip:             { mode: person, media: image, gt: voc_xml, classes: { person: 0 }, use: none, note: "비상업 라이선스 → 인증 제품 학습 금지. 진단용만" }

@@ -143,20 +143,27 @@ async function boot() {
   META = await (await fetch("/api/meta")).json();
   try { LABELS = await (await fetch("/api/labels")).json(); } catch (e) { LABELS = null; }
   try { PLABELS = await (await fetch("/api/labels?kind=person")).json(); } catch (e) { PLABELS = null; }
+  try { IMGLABELS = await (await fetch("/api/labels?kind=image")).json(); } catch (e) { IMGLABELS = []; }
   try { SAMFR = await (await fetch("/api/sam2frames")).json(); } catch (e) { SAMFR = {}; }   // SAM 전파 프레임(목록 배지 합산용)
-  try { const cf = await (await fetch("/api/config")).json(); window.PROP_DEFAULT = cf.prop_default; } catch (e) {}   // 서버가 정한 기본 전파 방식
+  try { DATASETS = await (await fetch("/api/datasets")).json(); } catch (e) { DATASETS = {}; }   // 데이터 규격(카테고리별 mode·gt·use)
   for (const [k, v] of Object.entries(META.items)) v.rows.forEach(row => row.item = k);
   const last = (typeof loadSession === "function") ? loadSession() : {};
   if (last.mode === "data" || last.mode === "review" || last.mode === "results") CUR.mode = last.mode;
-  if (last.dsKind) DS_KIND = last.dsKind;          // 카테고리는 buildDatasetSrc 가 DS_SEL 을 그대로 쓴다
-  if (last.dsSel) DS_SEL = last.dsSel;
+  DS_KIND = "raw";                                  // 학습 데이터 탭은 없다
+  if (last.dsSel && String(last.dsSel).startsWith("raw:")) DS_SEL = last.dsSel;
   buildMode(); applyMode();   // 시작 모드에 맞는 좌측/중앙 패널을 그린다(데이터 확인=데이터셋 패널)
   restoreLast(last);
 }
 
 // 새로고침 전에 보던 영상·프레임으로 되돌린다. 목록이 그려질 때까지만 기다리고, 없으면 조용히 포기.
 async function restoreLast(last) {
-  if (!last || CUR.mode !== "data" || !last.rel) return;
+  if (!last || CUR.mode !== "data") return;
+  if (last.img && !last.rel) {                          // 이미지 편집 중이었으면 그 이미지로
+    for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 150)); if (document.querySelector("#list .item")) break; }
+    try { openImage(last.img); } catch (e) {}
+    return;
+  }
+  if (!last.rel) return;
   for (let i = 0; i < 40; i++) {
     await new Promise(r => setTimeout(r, 150));
     if (document.querySelector("#list .item")) break;

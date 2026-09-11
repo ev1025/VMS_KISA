@@ -17,7 +17,7 @@ function passFilter(stem) {
   return true;
 }
 // 편집기 전역 상태. src = 지금 화면 박스의 출처(hand 손라벨 · sam 전파 결과 · gt 정답 · dino 자동 · none 없음)
-let LB = { cat: null, clip: null, sec: 0, boxes: [], src: "none", mode: null, img: null };   // img = 정지 이미지 편집 중이면 그 상대경로
+let LB = { cat: null, clip: null, sec: 0, boxes: [], src: "none", mode: null };
 const stemOf = pathStr => String(pathStr).split("/").pop();   // 라벨은 파일 이름(stem)으로 묶인다
 
 // ---------- 프레임 단위(사람 0.5초 · 화재 1초): 양자화·표시 변환은 전부 여기서 ----------
@@ -29,7 +29,7 @@ function _undisp(v) { return LB.mode === "person" ? v / 2 : v; }
 const near = (a, b) => Math.abs(a - b) < 0.01;                                            // 같은 프레임 판정
 
 // 현재 편집 모드의 손라벨 저장소(person 이면 PLABELS, 아니면 LABELS)
-function _labelStore() { return LB.img ? IMGLABELS : ((LB.mode === "person") ? PLABELS : LABELS); }
+function _labelStore() { return (LB.mode === "person") ? PLABELS : LABELS; }
 // 그 프레임의 손라벨 상태. null = 기록 없음(프리필 대상) · [] = 검토완료(빈 라벨 마커, DINO 프리필 안 함) · 박스 목록 = 손라벨
 function existingBoxes(clip, t) {
   const S = _labelStore(); if (!S) return null;
@@ -133,7 +133,7 @@ function samFramesOf(clip) { const m = SAMMAP[clip] || {}; return Object.keys(m)
 function samBoxesAt(frames, sec) {
   const o = frames[tkey(sec)];
   if (!o) return [];
-  return Object.entries(o).map(([k, b]) => [samCls(+k), b[0], b[1], b[2], b[3], +k]);   // 6번째 = 객체 번호(화면 색·번호용, 저장 땐 뗀다)
+  return Object.entries(o).map(([k, b]) => [samCls(+k), b[0], b[1], b[2], b[3]]);
 }
 function samPolysAt(clip, sec) { const o = (SAMPOLY[clip] || {})[tkey(sec)]; return o ? Object.entries(o).map(([k, p]) => ({ obj: +k, poly: p })) : []; }
 
@@ -170,7 +170,6 @@ async function clipInfo(clip) {
 
 // 그 초의 프레임을 편집기에 띄운다. sec 는 프레임 격자(quant)에 맞춘다.
 async function openFrameAt(clip, sec, mode) {
-  if (LB.img) { LB.img = null; ED = null; }                 // 이미지 편집에서 영상으로 넘어오면 편집기를 새로 그린다
   if (sec != null && !isFinite(Number(sec))) sec = null;   // NaN 시각 방어(빈 입력·계산 오류) → 시작 프레임 자동 선택
   LB.mode = mode || LB.mode || "fire";
   if (ED && ED.clip === clip && ED.mode !== LB.mode) { ED = null; delete SAMST[clip]; }   // 라벨 모드(사람↔불연기)가 바뀌면 편집기를 새로 그린다: 객체 규약·버튼이 모드에 묶여 있다
@@ -202,8 +201,9 @@ async function openFrameAt(clip, sec, mode) {
       if (!ED || ED.clip !== clip || LB.sec !== sec) return;                  // 그사이 다른 클립·프레임으로 갔다
       if (!hasHand(saved)) {
         let bx = samBoxesAt(sam, sec), src = "sam";
-        if (!bx.length && saved === null) { bx = gtBoxesAt(gt, sec).map(b => b.slice(0, 5)); src = "gt"; }        // 데이터셋 정답 박스 = 편집 가능한 라벨
-        if (!bx.length && saved === null && LB.mode === "person") { bx = autoBoxesAt(dino, sec); src = "dino"; }   // DINO 초안은 사람 클립만
+        const more = saved === null && LB.mode === "person";
+        if (!bx.length && more) { bx = gtBoxesAt(gt, sec).map(b => b.slice(0, 5)); src = "gt"; }
+        if (!bx.length && more) { bx = autoBoxesAt(dino, sec); src = "dino"; }
         if (bx.length) ED.setPseudo(sec, bx, src);
       }
       ED.syncSam(); ED.fillShots(); ED.loadSam();
@@ -272,7 +272,6 @@ function renderEditor(f) {
   if (isFire()) { SM.objs = objsFor(); if (!FIRE.objs.includes(SM.cur)) SM.cur = 1; }   // 화재: 불·연기 두 객체 고정
   if (!(SM.propFrames && SM.propFrames.length) && (SAMFR[f.stem] || []).length) SM.propFrames = SAMFR[f.stem].map(tkey);   // 저장소에 SAM 결과가 있으면 전파 켜진 상태로 복원
   LB.boxes = f.saved ? f.saved.map(b => b.slice()) : []; LB.src = hasHand(f.saved) ? "hand" : "none";
-  if (f.prefill && f.prefill.length && !hasHand(f.saved)) { LB.boxes = f.prefill.map(b => b.slice()); LB.src = "gt"; }   // 데이터셋 정답 박스 = 우리 라벨과 같은 것. 고치면 손라벨로 저장된다
   let SP = [], SMASK = null;                          // 현재 프레임·현재 객체의 점, 마스크
   const c = $("#center"); c.innerHTML = "";
   const top = el("div"); top.style.cssText = "width:100%;align-self:flex-start";   // #center 가 세로 가운데 정렬이라 위로 붙인다
@@ -322,20 +321,16 @@ function renderEditor(f) {
   const bClr = mkBtn("전파 지우기", "이 클립의 SAM 전파 결과를 저장소에서 전부 뺀다(손라벨은 그대로)"); bClr.hidden = true;
   const pstat = el("span", "now", ""); pstat.style.whiteSpace = "nowrap";
   const bHand = mkBtn("손라벨 참조", "이 클립의 손라벨 프레임(전파 구간 안)을 전부 참조샷으로 등록");
+  const bGT = mkBtn("정답 참조", "데이터셋 정답(점·박스)을 참조샷으로: 점은 SAM 탭으로 박스를 만든다"); bGT.hidden = true;
   const bFuse = mkBtn("자동 감지", "이 프레임에서 불을 자동으로 찾아 참조샷으로 넣는다(Grounding DINO 박스 → SAM 마스크). 연기는 검출 박스가 실제 연기와 안 맞아 제외했다"); bFuse.hidden = !isFire();
   const tstat = el("span", "now", ""); tstat.style.cssText = "color:var(--mut);font-size:12px;white-space:nowrap";
   const bReset = mkBtn("학습프레임 초기화", "이 클립의 손라벨·전파 결과·참조샷을 전부 지운다(손라벨은 백업됨)"); bReset.style.cssText += ";color:#f85149;border-color:#f8514966;margin-left:auto";
   // 순서: 되돌리기 · 참조샷 만들기(손라벨·정답) · 전파 · 검수 · 보조(자동 감지) · 상태 · 초기화
-  [bUndo, bRedo, bHand, bGo, bClr, bRev, bFuse, tstat, pstat, bReset].forEach(b => rowAct.appendChild(b));
+  [bUndo, bRedo, bHand, bGT, bGo, bClr, bRev, bFuse, tstat, pstat, bReset].forEach(b => rowAct.appendChild(b));
   const rowObj = el("div"); rowObj.style.cssText = "display:flex;flex-direction:column;gap:6px;margin-top:10px";
   const shots = el("div");
   const undoBar = el("div"); undoBar.style.cssText = "padding:2px 2px 8px";   // 삭제 직후 되돌리기 버튼이 잠깐 뜨는 자리
   [rowAct, wrap, bar, shots, rowObj, undoBar].forEach(x => pane.appendChild(x));   // 순서: 도구 → 화면 → 프레임바 → 미리보기 → 객체
-  if (f.image) {                                      // 정지 이미지: 프레임·전파·미리보기가 없다. 정답이 있으면 '정답 가져오기'로 한 번에 손라벨로
-    bar.style.display = "none"; shots.style.display = "none";
-    [bHand, bGo, bClr, bRev, bFuse, bReset].forEach(b => { b.hidden = true; });
-    tstat.style.display = "none";
-  }
   const spin = pct => `<span style="display:inline-block;width:12px;height:12px;border:2px solid #58a6ff55;border-top-color:#58a6ff;border-radius:50%;animation:ed_sp .8s linear infinite;vertical-align:-2px;margin-right:6px"></span>${pct}%`;
   if (!document.getElementById("ed_sp")) { const stl = document.createElement("style"); stl.id = "ed_sp"; stl.textContent = "@keyframes ed_sp{to{transform:rotate(360deg)}}"; document.head.appendChild(stl); }
   const flash = (html, ms) => { pstat.innerHTML = html; if (ms) setTimeout(() => { if (mine() && pstat.innerHTML === html) pstat.innerHTML = ""; }, ms); };
@@ -378,12 +373,7 @@ function renderEditor(f) {
   const draw = (drag, dcls) => {
     let s = `<svg viewBox="0 0 ${f.W} ${f.H}" style="position:absolute;inset:0;width:100%;height:100%">`;
     const col = SRC_COLOR[LB.src] || SRC_COLOR.none;
-    LB.boxes.forEach((b, i) => {                     // 박스의 객체: 참조샷 → 전파 결과의 번호 → 화재면 클래스(불=1 연기=2). 있으면 객체 색 + 번호
-      const q = seedForBox(i);
-      const obj = q ? q.obj : ((LB.src === "sam" && b[5]) ? b[5] : (isFire() ? objOfCls(b[0]) : null));
-      s += rectSvg(b[1] * f.W, b[2] * f.H, b[3] * f.W, b[4] * f.H, obj ? samCol(obj) : col, LB.src === "dino");
-      if (obj && !q) { const bx = b[1] * f.W + 2, by = b[2] * f.H; s += `<text x="${bx}" y="${by >= 18 ? by - 4 : (b[2] + b[4]) * f.H + 16}" fill="${samCol(obj)}" font-size="16" font-weight="800">${obj}</text>`; }
-    });
+    LB.boxes.forEach((b, i) => { const q = seedForBox(i); s += rectSvg(b[1] * f.W, b[2] * f.H, b[3] * f.W, b[4] * f.H, q ? samCol(q.obj) : col, LB.src === "dino"); });
     const gt = GTMAP[f.clip];                         // 정답라벨(데이터셋 제공): 하늘색 점선 박스 + 마름모 점
     if (gt && LB.src !== "gt") gtBoxesAt(gt, f.t).forEach(b => { s += rectSvg(b[1] * f.W, b[2] * f.H, b[3] * f.W, b[4] * f.H, SRC_COLOR.gt, true); });
     if (gt) gtPointsAt(gt, f.t).forEach(p => { const x = p.x * f.W, y = p.y * f.H; s += `<polygon points="${x},${y - 7} ${x + 7},${y} ${x},${y + 7} ${x - 7},${y}" fill="${SRC_COLOR.gt}" stroke="#0b0e13" stroke-width="1.5"/><text x="${x + 9}" y="${y - 6}" fill="${SRC_COLOR.gt}" font-size="13" font-weight="800">정답${p.obj}</text>`; });
@@ -403,7 +393,7 @@ function renderEditor(f) {
   };
   drawRef = draw;
   const saveNow = async () => {                       // 화면 박스 → 손라벨 저장. DINO·정답 초안에서 손댄 프레임은 객체가 잡은 박스만 넘긴다(SAM 전파 결과는 보이는 그대로 손라벨로)
-    if (LB.src === "dino") dropUnownedPrefill();
+    if (LB.src === "dino" || LB.src === "gt") dropUnownedPrefill();
     try {
       await postLabel(f.stem, f.t, f.W, f.H, LB.boxes, f.src);
       f.saved = LB.boxes.map(b => b.slice()); LB.src = "hand";
@@ -604,7 +594,7 @@ function renderEditor(f) {
     if (idx >= 0) LB.boxes[idx] = nb; else { LB.boxes.push(nb); idx = LB.boxes.length - 1; }
     if (PROP_OBJ(SM.cur)) seedSet(r.box, r.poly, SP, idx);   // 연기(화재 객체 2)는 박스만 남기고 참조샷은 안 만든다
     else { SP = []; SMASK = { box: r.box, poly: r.poly }; drawObjs(); }
-    if (LB.src === "dino") dropUnownedPrefill();
+    if (LB.src === "dino" || LB.src === "gt") dropUnownedPrefill();
     draw(); saveNow();                                 // 탭한 프레임 → 손라벨(DINO·정답 초안은 객체가 잡은 박스만, SAM 결과는 그대로)
   }
   // ---------- SAM: 객체 줄 ----------
@@ -746,7 +736,33 @@ function renderEditor(f) {
     if (!SM.objs.includes(SM.cur)) SM.cur = SM.objs[0];
     loadSam(); fillShots();
   };
-  gtLabels(f.clip).then(() => { if (mine()) { updateTStat(); draw(); } });   // 정답이 늦게 오면 점선·마름모를 다시 그린다
+  gtLabels(f.clip).then(gt => { const has = (gt && ((gt.points && Object.keys(gt.points).length) || (gt.frames && Object.keys(gt.frames).length))); if (mine()) { bGT.hidden = !has; updateTStat(); draw(); } });
+  bGT.onclick = async () => {                        // 정답 → 참조샷
+    const gt = GTMAP[f.clip]; if (!gt) return;
+    bGT.disabled = true; pstat.innerHTML = spin(0);
+    const items = [];
+    Object.keys(gt.frames || {}).forEach(k => Object.entries(gt.frames[k]).forEach(([o, b]) => items.push({ t: +k, obj: +o, box: b })));
+    Object.keys(gt.points || {}).forEach(k => Object.entries(gt.points[k]).forEach(([o, p]) => items.push({ t: +k, obj: +o, pt: p })));
+    let n = 0;
+    for (const it of items) {
+      let box = it.box, poly = [], pts = [];
+      if (!box && it.pt) {                             // 점 → SAM 마스크 → 박스
+        const r = await postJSON("/api/sam2_mask", { clip: f.clip, t: it.t, pts: [[it.pt[0], it.pt[1], 1]] }).catch(() => ({}));
+        if (r.box) { box = r.box; poly = r.poly || []; pts = [[it.pt[0], it.pt[1], 1]]; }
+      }
+      if (!mine()) return;                             // 그사이 다른 클립으로 갔다
+      n++; pstat.innerHTML = spin(Math.round(n / items.length * 100));
+      if (!box) continue;
+      if (!SM.objs.includes(it.obj)) SM.objs.push(it.obj);
+      SM.seeds = SM.seeds.filter(q => !(near(q.t, it.t) && q.obj === it.obj));
+      SM.seeds.push({ t: it.t, obj: it.obj, box, poly, pts, i: null, fromGT: true });
+      if (near(it.t, f.t)) { LB.boxes.push([samCls(it.obj), box[0], box[1], box[2], box[3]]); LB.src = "hand"; }
+    }
+    SM.objs.sort((a, b) => a - b); SM.seeds.sort((a, b) => a.t - b.t || a.obj - b.obj);
+    if (!SM.objs.includes(SM.cur)) SM.cur = SM.objs[0];
+    bGT.disabled = false; pstat.innerHTML = "";
+    loadSam(); fillShots(); draw(); if (LB.boxes.length && LB.src === "hand") saveNow();
+  };
   bFuse.onclick = async () => {                      // 화재: Grounding DINO 박스 → SAM 마스크 → 불(1)·연기(2) 참조샷(이 프레임)
     const t = f.t; bFuse.disabled = true; pstat.innerHTML = spin(0);
     const r = await postJSON("/api/fuse_detect", { clip: f.clip, t }).catch(() => ({}));
@@ -907,7 +923,6 @@ function renderEditor(f) {
       }
       SP = []; samRecompute(); return;
     }
-    if (f.image) return;                                                                 // 정지 이미지: 프레임 이동 없음
     if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") { ev.preventDefault(); openFrameAt(f.clip, f.t + (ev.key === "ArrowLeft" ? -1 : 1) * (ev.shiftKey ? 10 : _step()), LB.mode); return; }
     if (/^[weWE]$/.test(ev.key)) { ev.preventDefault(); openFrameAt(f.clip, f.t + (/^[eE]$/.test(ev.key) ? 1 : -1) * _step(), LB.mode); }   // W=이전 · E=다음 프레임
   };
@@ -957,7 +972,7 @@ function reviewItems(f) {
 }
 const gtSvg = (d, W, H) => d.gt.map(b => `<rect x="${b[1] * W}" y="${b[2] * H}" width="${b[3] * W}" height="${b[4] * H}" fill="none" stroke="${SRC_COLOR.gt}" stroke-width="2" stroke-dasharray="8 5"/>`).join("") +
   d.gtp.map(p => { const x = p.x * W, y = p.y * H; return `<polygon points="${x},${y - 9} ${x + 9},${y} ${x},${y + 9} ${x - 9},${y}" fill="${SRC_COLOR.gt}" stroke="#0b0e13" stroke-width="1.5"/>`; }).join("");
-const boxCol = (d, b) => d.src === "hand" ? SRC_COLOR.hand : samCol(b[5] || (isFire() ? objOfCls(b[0]) : 1));   // 전파 결과는 객체 번호 색
+const boxCol = (d, b) => d.src === "hand" ? SRC_COLOR.hand : (isFire() ? samCol(objOfCls(b[0])) : SRC_COLOR.sam);
 const capOf = d => `${_disp(d.t)} · <span style="color:${d.src === "hand" ? SRC_COLOR.hand : d.src === "sam" ? SRC_COLOR.sam : "var(--mut)"};font-weight:700">${d.src === "hand" ? "손 " + d.boxes.length : d.src === "sam" ? "SAM " + d.boxes.length : "라벨 없음"}</span>` +
   ((d.gt.length || d.gtp.length) ? ` <span style="color:${SRC_COLOR.gt}">정답 ${d.gt.length ? d.gt.length + "박스" : ""}${d.gt.length && d.gtp.length ? " " : ""}${d.gtp.length ? d.gtp.length + "점" : ""}</span>` : "");
 async function openAutoReview(f) {
@@ -1179,36 +1194,11 @@ function buildFrameBar(f, status) {
 
 // 그 초의 박스를 서버에 쓴다. boxes 가 빈 배열이면 그 프레임은 '검토완료(빈 라벨)' 로 남는다. 서버가 같은 프레임의 SAM 결과를 뺀다.
 async function postLabel(clip, t, W, H, boxes, src, clear) {
-  const kind = LB.img ? "image" : ((LB.mode === "person") ? "person" : "fire");
-  const evalCat = (typeof isScoringCat === "function") && isScoringCat((src || "").split("/")[2] || (LB.img || "").split("/")[2] || "");   // 채점 전용 카테고리 → eval 표시
-  const res = await postJSON("/api/savelabel", { clip, t, src, file: LB.img || `${clip}_${String(t).padStart(4, "0")}.png`, W, H, boxes: boxes.map(b => b.slice(0, 5)), kind, clear: !!clear, eval: !!evalCat });   // 6번째(객체 번호)는 화면용
+  const kind = (LB.mode === "person") ? "person" : "fire";
+  const res = await postJSON("/api/savelabel", { clip, t, src, file: `${clip}_${String(t).padStart(4, "0")}.png`, W, H, boxes, kind, clear: !!clear });
   if (!res.ok) throw new Error(res.err || "저장 실패");
-  if (kind === "image") IMGLABELS = res.labels || IMGLABELS; else if (kind === "person") PLABELS = res.labels || PLABELS; else LABELS = res.labels || LABELS;
+  if (kind === "person") PLABELS = res.labels || PLABELS; else LABELS = res.labels || LABELS;
   return res;
-}
-
-// ---------- 정지 이미지 한 장 편집: 같은 편집기를 프레임바·전파·미리보기 없이 연다 ----------
-// rel = vms 기준 상대경로(data/원본데이터/.../x.jpg). 서버에는 'img:<rel>' 을 클립 이름으로 넘긴다.
-async function openImageEdit(rel) {
-  const key = "img:" + rel;
-  LB.img = rel; LB.mode = catMode(rel); LB.clip = key; LB.sec = 0; ED = null;
-  const url = "/dsimg/" + rel.split("/").map(encodeURIComponent).join("/");
-  const im = await new Promise(res => { const g = new Image(); g.onload = () => res(g); g.onerror = () => res(null); g.src = url; });
-  if (!im) { $("#center").innerHTML = '<div class="empty">이미지를 못 읽었습니다</div>'; return; }
-  // 데이터셋 정답(YOLO txt)이 있으면 점선으로 보이게 GTMAP 에 넣는다(0.0초 한 프레임). 클래스는 imgcls 에 따로
-  try {
-    const txt = await (await fetch("/api/rawlabel?rel=" + encodeURIComponent(rel))).text();
-    const bx = txt.trim().split("\n").filter(Boolean).map(l => l.split(/\s+/).map(Number)).filter(b => b.length >= 5);
-    const fr = {}; bx.forEach((b, i) => { fr[String(i + 1)] = [b[1] - b[3] / 2, b[2] - b[4] / 2, b[3], b[4]]; });
-    GTMAP[key] = { frames: bx.length ? { "0.0": fr } : {}, points: {}, imgcls: bx.map(b => b[0]) };
-    GTL[key] = Promise.resolve(GTMAP[key]);
-  } catch (e) { GTMAP[key] = { frames: {}, points: {} }; GTL[key] = Promise.resolve(GTMAP[key]); }
-  SAML[key] = Promise.resolve(SAMMAP[key] = {}); AUTOL[key] = Promise.resolve({});   // 이미지엔 전파·DINO 저장소가 없다
-  saveSession({ img: rel, rel: null });
-  const g = GTMAP[key], fr = (g.frames || {})["0.0"] || {}, cls = g.imgcls || [];
-  const prefill = Object.keys(fr).map((k, i) => [isFire() ? (cls[i] === 1 ? 1 : 0) : 0, ...fr[k]]);   // 정답 클래스: 0 불 · 1 연기(화재) / 사람은 전부 0
-  if (typeof imageRightPanel === "function") imageRightPanel(rel, true, prefill.length);
-  renderEditor({ clip: key, stem: key, src: rel, t: 0, last: 0, W: im.naturalWidth, H: im.naturalHeight, url, saved: existingBoxes(key, 0), image: true, prefill });
 }
 // 그 프레임의 손라벨 기록을 마커 없이 지운다(되돌리기로 초안 상태로 돌아갈 때). 없던 것처럼 된다.
 const clearLabel = (clip, t) => postLabel(clip, t, 0, 0, [], null, true);

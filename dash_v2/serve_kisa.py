@@ -40,9 +40,24 @@ def _backup_labels(fl):
 _CLIPS = {}       # 카테고리별 영상 목록 캐시
 
 
+import gt_adapters as GTA              # 데이터 규격 계층(원본 정답 형식별 어댑터 + datasets.yaml)
+DATASETS = GTA.Datasets(G / "configs/datasets.yaml", RAW)   # 카테고리 설정 단일 기준(mode·media·gt·classes·use)
+
+
+def cat_of(rel_or_clip):
+    """'data/원본데이터/<cat>/...' · '<cat>/...' · 'img:data/원본데이터/<cat>/...' 어느 꼴이든 카테고리 이름."""
+    s = str(rel_or_clip).replace("\\", "/")
+    if s.startswith("img:"):
+        s = s[4:]
+    parts = [q for q in s.split("/") if q]
+    if len(parts) >= 3 and parts[0] == "data" and parts[1] == "원본데이터":
+        return parts[2]
+    return parts[0] if parts else ""
+
+
 def label_file(kind):
-    """손라벨 파일. kind == "person" 이면 사람, 아니면 화재."""
-    fn = "person_labels.json" if kind == "person" else "fire_labels.json"
+    """손라벨 파일. person = 사람 영상, image = 이미지 데이터셋(정지 이미지, 클립 대신 'img:<상대경로>'), 그 외 = 화재 영상."""
+    fn = "person_labels.json" if kind == "person" else ("image_labels.json" if kind == "image" else "fire_labels.json")
     return data_path("data/학습데이터/손라벨/" + fn, fn)
 
 
@@ -546,8 +561,19 @@ def _prep_frame(clip, sec):
     if hit is not None:
         return hit
     fr = None
+    if str(clip).startswith("img:"):                       # 정지 이미지: 'img:data/원본데이터/.../x.jpg' (vms 기준 상대경로)
+        ip = G / str(clip)[4:]
+        try:
+            ok = ip.is_file() and WS in ip.resolve().parents
+        except Exception:
+            ok = False
+        if not ok:
+            return None
+        fr = cv2.imdecode(np.frombuffer(ip.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+        if fr is None:
+            return None
     _c = frame_cache_path(clip, sec, 0)
-    if _c.exists():
+    if fr is None and _c.exists():
         fr = cv2.imdecode(np.frombuffer(_c.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
     if fr is None:
         mp4 = under_raw(clip, ".mp4")
@@ -811,7 +837,7 @@ def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None
 
 # ---------- Grounding DINO(zero-shot 박스) + SAM2(마스크) 융합: 형태가 모호한 연기용 ----------
 _GDINO = None
-GDINO_FIRE_PROMPT = "fire. flame. smoke."
+GDINO_FIRE_PROMPT = "fire. flame."      # 연기는 뺐다: DINO 연기 박스가 손 박스와 IoU 0.08~0.29 로 안 맞는다(2026-09-11 5프레임 실측)
 GDINO_PERSON_PROMPT = "a person. a pedestrian. a human. a man walking. a person with an umbrella."
 
 
@@ -846,7 +872,8 @@ def _frame_bgr(clip, sec):
 
 
 def fuse_detect(clip, sec, th=0.25):
-    """화재 프레임: DINO 로 불·연기 박스를 찾고 SAM2 로 마스크를 따서 객체(1 불 · 2 연기)마다 가장 점수 높은 하나를 돌려준다.
+    """화재 프레임: DINO 로 불 박스를 찾고 SAM2 로 마스크를 따서 객체 1(불) 하나를 돌려준다.
+    연기는 제외한다 — DINO 가 연기라고 준 박스가 사람이 그린 연기 박스와 거의 안 맞는다(IoU 0.08~0.29).
     반환 {obj: {"box": [x,y,w,h], "poly": [...], "score": DINO 점수, "label": 텍스트}}"""
     fr = _frame_bgr(clip, sec)
     if fr is None:
@@ -854,7 +881,9 @@ def fuse_detect(clip, sec, th=0.25):
     h0, w0 = fr.shape[:2]
     best = {}
     for sc, x1, y1, x2, y2, lb in gdino_detect(fr, GDINO_FIRE_PROMPT, th):
-        obj = 2 if "smoke" in lb.lower() else 1
+        if "smoke" in lb.lower():
+            continue
+        obj = 1
         if obj in best and best[obj]["score"] >= sc:
             continue
         nb = [round(x1 / w0, 5), round(y1 / h0, 5), round((x2 - x1) / w0, 5), round((y2 - y1) / h0, 5)]
@@ -950,8 +979,11 @@ def derive_gt(clip):
     stem = Path(clip).stem
     src_rel = None
     d = {"clip": stem, "frames": {}, "points": {}, "actions": {}, "events": [], "derived": True}
+    fmt = (DATASETS.get(cat_of(clip)) or {}).get("gt") or ""     # 규격에 적힌 형식. 아래 분기는 형식별이고 데이터셋별이 아니다
     xml = under_raw(clip, ".xml")
-    if xml is not None and xml.exists():
+    if fmt == "none":
+        return None
+    if xml is not None and xml.exists() and fmt in ("", "kisa_xml", "aihub171_xml"):
         import xml.etree.ElementTree as ET
         try:
             r = ET.parse(xml).getroot()
@@ -1265,6 +1297,17 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._bytes(json.dumps({"err": str(e)}).encode(), "application/json; charset=utf-8", 500)
             return
+        if p in ("/api/catmode", "/api/datasets"):   # {cat, mode|media|gt|classes|use|note ...} 저장 → datasets.yaml. 값이 null 이면 그 필드를 지운다
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                b = json.loads(self.rfile.read(n) or b"{}")
+                fields = {k: v for k, v in b.items() if k != "cat" and k in ("mode", "media", "gt", "classes", "use", "note")}
+                with _SAVE_LOCK:
+                    cur = DATASETS.set(b["cat"], **fields)
+                self._bytes(json.dumps({"ok": True, "cat": b["cat"], "cfg": cur}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            except Exception as e:
+                self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)
+            return
         if p == "/api/fuse_detect":          # 화재 한 프레임: Grounding DINO 불·연기 박스 → SAM2 마스크
             try:
                 n = int(self.headers.get("Content-Length", 0))
@@ -1361,12 +1404,13 @@ class H(BaseHTTPRequestHandler):
                 W = int(body.get("W", 1280)); Hh = int(body.get("H", 720))
                 file = body.get("file", f"{clip}_{t}.png")
                 src = str(body.get("src") or "").replace("\\", "/") or None
+                ev = {"eval": True} if body.get("eval") else {}        # 채점 전용 카테고리(검증·채점·배포)의 라벨: 학습셋 빌더가 뺀다
                 for b in body.get("boxes", []):
                     cls, x, y, w, h = b
                     rows.append({"file": file, "clip": clip, "src": src, "t": t, "cls": int(cls),
                                  "x": round(float(x), 5), "y": round(float(y), 5),
                                  "w": round(float(w), 5), "h": round(float(h), 5),
-                                 "W": W, "H": Hh, "crop": [0, 0, W, Hh]})
+                                 "W": W, "H": Hh, "crop": [0, 0, W, Hh], **ev})
                 if not body.get("boxes") and not body.get("clear"):
                     # 박스 0개로 저장(사람이 다 지움) = '검토했고 객체 없음' 마커(사람·화재 공통). 이래야 다시 DINO 프리필 안 된다. clear=true 면 기록만 지운다(되돌리기)
                     rows.append({"file": file, "clip": clip, "src": src, "t": t, "cls": -1,
@@ -1402,6 +1446,14 @@ class H(BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             f = label_file((q.get("kind") or [""])[0])
             self._stream(f, "application/json; charset=utf-8") if f.exists() else self._bytes(b"[]", "application/json; charset=utf-8")
+            return
+        if p == "/api/catmode":               # 카테고리별 라벨 모드 = datasets.yaml 의 mode (호환용)
+            self._bytes(json.dumps({c: v.get("mode") for c, v in DATASETS.all().items()}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+            return
+        if p == "/api/datasets":              # 데이터 규격 전체(카테고리별 mode·media·gt·classes·use·note). 없는 카테고리는 훑어서 채운다
+            cats = [d.name for d in RAW.iterdir() if d.is_dir()] if RAW.is_dir() else []
+            out = {c: DATASETS.get(c) for c in sorted(set(cats) | set(DATASETS.all()))}
+            self._bytes(json.dumps(out, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             return
         if p == "/api/config":                # 클라이언트가 알아야 하는 서버 기본값
             self._bytes(json.dumps({"prop_default": PROP_DEFAULT_MODE, "prop_thr": PROP_THR}).encode(), "application/json; charset=utf-8")
@@ -1561,9 +1613,16 @@ class H(BaseHTTPRequestHandler):
                             "n": len(rows), "mtime": int(f.stat().st_mtime), "rules": rows})
             out.sort(key=lambda r: -r["score"])
             self._bytes(json.dumps(out).encode("utf-8"), "application/json; charset=utf-8"); return
-        if p == "/api/rawlabel":
+        if p == "/api/rawlabel":                 # 이미지 원본 정답 → 우리 클래스 규약의 YOLO 줄(datasets.yaml 의 gt·classes 로 변환)
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             rel = qs.get("rel", [""])[0]
+            try:
+                cfg = DATASETS.get(cat_of(rel))
+                d = GTA.image_gt(cfg, G, rel)
+                if d is not None:
+                    self._bytes(GTA.to_yolo_lines(d).encode("utf-8"), "text/plain; charset=utf-8"); return
+            except Exception:
+                pass
             sib = (G/rel).with_suffix(".txt")               # 1) 원본 옆 YOLO txt
             try:
                 if sib.exists() and WS in sib.resolve().parents:

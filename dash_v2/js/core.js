@@ -5,7 +5,7 @@ const el = (t, c, h) => { const e = document.createElement(t); if (c) e.classNam
 const fmt = s => s == null ? "-" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const BEFORE = 2, AFTER = 10;
 
-let META = null, LABELS = null, PLABELS = null;
+let META = null, LABELS = null, PLABELS = null, IMGLABELS = null;   // 화재 영상 · 사람 영상 · 정지 이미지 손라벨
 let CUR = { item: "fire", name: null, mode: "data" };   // 첫 화면 = 데이터 확인
 let FILT = "all", VID = null;
 
