@@ -532,7 +532,8 @@ function renderEditor(f) {
     const b = LB.boxes[i]; if (!b) return;             // 옮기기·크기조절(create=false)은 '고치기'라 참조샷을 새로 만들지 않는다(전파 결과를 다듬을 때 칩이 쌓이지 않게)
     if (isFire() && b[0] === 1) { SMASK = null; return; }   // 연기 박스는 참조샷을 만들지 않는다(전파 대상 아님)
     const box = box4(b);
-    const owner = seedForBox(i);
+    const owner0 = seedForBox(i);
+    const owner = (create && owner0 && owner0.obj !== SM.cur) ? null : owner0;   // 새 박스 드래그는 현재 객체로만: 겹친 다른 객체 박스에 IoU 로 붙지 않게
     if (owner) { owner.poly = clipPoly(owner.poly, box); owner.box = box; owner.i = i; if (owner.obj === SM.cur) SMASK = { box, poly: owner.poly }; drawObjs(); }   // 박스를 옮기거나 줄이면 마스크도 박스 안으로 잘라 따라가게
     else if (create) { SMASK = { box, poly: [] }; seedSet(box, [], SP, i); }
     draw();
@@ -544,17 +545,7 @@ function renderEditor(f) {
     snap();
     if (nearPt >= 0) { SP.splice(nearPt, 1); return samRecompute(); }   // 찍힌 점을 다시 탭 = 그 점 제거
     const claimed = new Set(LB.boxes.map((b, i) => i).filter(i => { const q = seedForBox(i); return q && q.obj !== SM.cur; }));   // 다른 객체의 박스
-    if (label === 1 && !SP.length) {                   // 번호 바꾸기: 다른 객체의 박스를 점 없이 탭 → 그 참조샷을 현재 객체로
-      const oi = LB.boxes.findIndex((b, i) => claimed.has(i) && x >= b[1] && x <= b[1] + b[3] && y >= b[2] && y <= b[2] + b[4]);
-      const q = oi >= 0 ? seedForBox(oi) : null;
-      if (q) {
-        SM.seeds = SM.seeds.filter(s2 => !(near(s2.t, t) && s2.obj === SM.cur));   // 현재 객체가 이 프레임에 갖고 있던 참조샷은 버린다
-        q.obj = SM.cur; q.i = oi; SP = (q.pts || []).slice(); SMASK = { box: q.box, poly: q.poly || [] };
-        LB.boxes[oi][0] = samCls(SM.cur);
-        drawObjs(); draw(); saveNow(); return;
-      }
-    }
-    // 화면 박스(손/SAM/정답) 안을 점 없이 좌클릭 → 그 박스로 프롬프트
+    // 화면 박스(손/SAM/정답) 안을 점 없이 좌클릭 → 그 박스로 프롬프트 (남의 객체 박스는 pool 에서 제외 → 뺏지 않는다)
     const pool = LB.boxes.map((b, i) => ({ b, i })).filter(o => !claimed.has(o.i));
     const hits = (label === 1 && !SP.length) ? pool.filter(o => x >= o.b[1] && x <= o.b[1] + o.b[3] && y >= o.b[2] && y <= o.b[2] + o.b[4]) : [];
     const hit = hits.sort((a, b) => a.b[3] * a.b[4] - b.b[3] * b.b[4])[0] || null;   // 겹치면 가장 작은 박스

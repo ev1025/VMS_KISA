@@ -22,6 +22,7 @@ ap.add_argument("mode", choices=["fire", "person"])
 ap.add_argument("--name", default=None)
 ap.add_argument("--val", type=float, default=0.1)
 ap.add_argument("--max-gt", type=int, default=0, help="카테고리당 원본 정답 이미지 상한(0=전부)")
+ap.add_argument("--neg", type=int, default=5, help="손라벨 클립당 앞/뒤 각 하드 네거티브 장수(0=끔). 상한=그 클립 양성 프레임 수")
 ap.add_argument("--dry", action="store_true")
 a = ap.parse_args()
 
@@ -88,10 +89,12 @@ for f in glob.glob(str(V / "data/학습데이터/자동라벨/sam2/*.json")):
             sam_frames[key].append((c, b))
 
 
+_MP4 = None
 def clip_full(stem):
-    for p in RAW.rglob(stem + ".mp4"):
-        return p
-    return None
+    global _MP4
+    if _MP4 is None:
+        _MP4 = {p.stem: p for p in RAW.rglob("*.mp4")}   # mp4 색인 한 번(원본 전체를 클립마다 훑지 않게)
+    return _MP4.get(stem)
 
 
 # 영상 프레임(손라벨 + SAM): 카테고리 use/mode 확인
@@ -111,6 +114,41 @@ for src_name, frames in (("hand", hand_frames), ("sam", sam_frames)):
             stats[f"제외:use={cfg.get('use')}({cat})"] += 1; continue
         items.append(("val" if is_val(stem) else "train", (mp4, t), boxes, src_name))
         stats[f"영상프레임:{src_name}"] += 1
+
+# ---------- 2.5) 하드 네거티브(손라벨 클립만): 라벨 구간 앞뒤 배경을 무라벨로 ----------
+NEG_STEP = 0.5                                   # 샘플 간격(초)
+NEG_BUF = 10 if a.mode == "fire" else 0          # 라벨 구간에서 띄울 간격(스텝). 불연기=10프레임 버퍼(연기가 인접 프레임까지 번짐), 사람=바로 앞뒤
+occ = collections.defaultdict(set)               # stem → 양성 시각(손+SAM): 버퍼·배제에 쓴다
+hand_pos_n = collections.Counter()               # stem → 손라벨 양성 프레임 수(개수 상한)
+for (stem, t), boxes in hand_frames.items():
+    if boxes:
+        occ[stem].add(t); hand_pos_n[stem] += 1
+for (stem, t), boxes in sam_frames.items():
+    if boxes:
+        occ[stem].add(t)
+if a.neg > 0:
+    for stem in sorted(occ):
+        if not hand_pos_n[stem]:                 # 손라벨이 있는 클립만(SAM 만 있는 건 제외)
+            continue
+        mp4 = vid_cache.get(stem)
+        if not mp4:
+            continue
+        cfg = D.get(mp4.relative_to(RAW).parts[0])
+        if cfg.get("mode") != a.mode or cfg.get("use") != "train":   # 채점(eval)·라이선스(none) 클립은 네거티브로도 안 쓴다(누수)
+            continue
+        cap = cv2.VideoCapture(str(mp4)); fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        dur = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / (fps or 30.0); cap.release()
+        pos = occ[stem]; f0, f1 = min(pos), max(pos); buf = NEG_BUF * NEG_STEP
+        before = [round(f0 - buf - k * NEG_STEP, 1) for k in range(1, a.neg + 1)]
+        before = [t for t in before if t >= 0.5]
+        after = [round(f1 + buf + k * NEG_STEP, 1) for k in range(1, a.neg + 1)]
+        after = [t for t in after if t <= dur - 0.5]
+        cand = [x for pair in zip(before, after) for x in pair] + before[len(after):] + after[len(before):]   # 앞뒤 번갈아(균형)
+        cand = [t for t in cand if all(abs(t - q) >= NEG_STEP for q in pos)]   # 양성 근처 제외(안전)
+        cand = cand[:hand_pos_n[stem]]           # 상한 = 손라벨 양성 프레임 수
+        for t in cand:
+            items.append(("val" if is_val(stem) else "train", (mp4, t), [], "neg"))
+            stats["하드네거티브"] += 1
 
 # ---------- 3) 이미지: 손라벨 > 원본 정답(어댑터) ----------
 for cat, cfg in sorted(D.all().items()):
