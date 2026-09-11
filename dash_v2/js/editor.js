@@ -305,7 +305,7 @@ function renderEditor(f) {
   const rowAct = el("div"); rowAct.style.cssText = "display:flex;align-items:center;gap:8px;margin:0 0 10px;flex-wrap:wrap";
   const mkBtn = (txt, title) => { const b = el("button", null, txt); b.title = title; b.style.cssText = "width:auto;padding:0 9px;height:28px;background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;font-weight:700;cursor:pointer"; return b; };
   const bUndo = mkBtn("↶", "되돌리기 (Ctrl+Z)"), bRedo = mkBtn("↷", "다시하기 (Ctrl+Shift+Z)"), bRev = mkBtn("라벨 검수", "이 클립의 SAM 전파 결과를 격자로 검수");
-  const bGo = mkBtn("전파", "참조샷으로 전파 → SAM 저장소 자동 저장. 전파 결과가 있는 클립에서 참조샷을 더 찍으면 그 구간만 이어서 다시 전파"); bGo.style.cssText += ";color:var(--blue);border-color:var(--blue);font-weight:800;padding:0 12px";
+  const bGo = mkBtn("전파", "참조샷으로 전파 → SAM 저장소 자동 저장. 결과가 있는 클립에서 지금 프레임에 참조샷이 있으면 '이어서 전파' = 그 프레임부터 종료까지 뒤로만"); bGo.style.cssText += ";color:var(--blue);border-color:var(--blue);font-weight:800;padding:0 12px";
   const bClr = mkBtn("전파 지우기", "이 클립의 SAM 전파 결과를 저장소에서 전부 뺀다(손라벨은 그대로)"); bClr.hidden = true;
   const pstat = el("span", "now", ""); pstat.style.whiteSpace = "nowrap";
   const bHand = mkBtn("손라벨 참조", "이 클립의 손라벨 프레임(전파 구간 안)을 전부 참조샷으로 등록");
@@ -804,13 +804,13 @@ function renderEditor(f) {
   // ---------- SAM: 전파(서버 큐) → SAM 저장소 자동 저장. 결과가 있는 클립에서 참조샷을 더 찍으면 그 구간만 이어서 전파 ----------
   let _activeJob = null, _cancelling = false;
   const hasProp = () => !!(SM.propFrames && SM.propFrames.length);
-  const newSeeds = () => SM.seeds.filter(q => !(SAMSEEDS[f.clip] || []).some(sd => +sd.obj === q.obj && near(+sd.t, q.t)));   // 저장소에 아직 없는 참조샷 = 이번에 새로 찍은 것
+  const seedHere = () => SM.seeds.some(q => near(q.t, f.t) && PROP_OBJ(q.obj));   // 지금 보고 있는 프레임에 전파 대상 참조샷이 있나(이어서 전파의 시작점)
   const styleGo = () => {
-    const on = hasProp(), refine = on && newSeeds().length > 0, dis = !_activeJob && !SM.seeds.length;
+    const on = hasProp(), refine = on && seedHere(), dis = !_activeJob && !SM.seeds.length;
     bGo.style.background = on && !refine && !dis ? "var(--blue)" : "var(--panel)"; bGo.style.color = on && !refine && !dis ? "#06090f" : "var(--blue)";
     if (!_activeJob) { bGo.textContent = refine ? "이어서 전파" : "전파"; bGo.disabled = !SM.seeds.length; }
     bGo.style.opacity = bGo.disabled ? "0.5" : "1"; bGo.style.cursor = bGo.disabled ? "not-allowed" : "pointer";
-    bGo.title = bGo.disabled ? "참조샷이 없습니다. 불을 탭하거나 박스를 그려 참조샷을 만든 뒤 전파하세요" : "참조샷으로 전파 → SAM 저장소 자동 저장. 결과가 있는 클립에서 참조샷을 더 찍으면 그 구간만 이어서";
+    bGo.title = bGo.disabled ? "참조샷이 없습니다. 불을 탭하거나 박스를 그려 참조샷을 만든 뒤 전파하세요" : "참조샷으로 전파 → SAM 저장소 자동 저장. 이어서 전파 = 지금 프레임의 참조샷부터 종료 프레임까지 뒤로만(범위 안)";
     bClr.hidden = !on || !!_activeJob;
     const gt = GTMAP[f.clip] || {}, rv = on || shotSecs(f.stem).length > 0 || gtFramesOf(f.clip).length > 0 || Object.keys(gt.points || {}).length > 0;   // 검수 = 손라벨·SAM·정답 중 하나라도 있으면
     bRev.disabled = !rv; bRev.style.opacity = rv ? "1" : "0.4"; bRev.style.cursor = rv ? "pointer" : "default"; bRev.title = rv ? "학습 라벨(손·SAM)과 정답을 격자로 비교·검수" : "검수할 라벨이 없습니다";
@@ -849,17 +849,6 @@ function renderEditor(f) {
     if (!seen.err) { SM.handRef = false; if (mine()) { styleHand(); loadSam(); } }   // 참조샷은 그대로 둔다: 지우고 다시, 또는 이어서 전파할 수 있게. 참조 프레임은 손라벨이라 저장소에도 남는다
     await refreshSam();
   };
-  const refineWindow = () => {                        // 이어서 전파할 구간: 새 참조샷마다 [같은 객체의 직전 저장소 참조샷, 직후 참조샷] 을 합친다
-    const stored = SAMSEEDS[f.clip] || [];
-    let a = Infinity, b = -Infinity;
-    newSeeds().forEach(q => {                        // 새 참조샷마다: 같은 객체의 직전 저장 참조샷 ~ 직후 저장 참조샷(없으면 시작/종료)
-      const same = stored.filter(s => +s.obj === q.obj).map(s => +s.t);
-      const prev = Math.max.apply(null, [SM.a == null ? 0 : SM.a, ...same.filter(t => t < q.t)]);
-      const nxt = Math.min.apply(null, [SM.b == null ? f.last : SM.b, ...same.filter(t => t > q.t)]);
-      a = Math.min(a, prev); b = Math.max(b, nxt);
-    });
-    return [Math.max(0, a), Math.min(f.last, b)];
-  };
   bGo.onclick = async () => {
     if (_activeJob) {                                 // 진행·대기 중 → 취소(참조샷은 그대로 남아 취소가 끝나면 다시 전파)
       _cancelling = true; bGo.disabled = true; bGo.textContent = "취소 중…";
@@ -867,9 +856,12 @@ function renderEditor(f) {
       return;
     }
     if (!SM.seeds.length) return;
-    const refine = hasProp() && newSeeds().length > 0;   // 새 참조샷이 있을 때만 그 구간만 이어서. 없으면 전체 구간 다시
+    const refine = hasProp() && seedHere();          // 이어서 전파: 지금 프레임의 참조샷부터 종료까지(뒤로만). 없으면 전체 구간 다시
     let a, b;
-    if (refine) [a, b] = refineWindow();
+    if (refine) {
+      a = Math.max(f.t, SM.a == null ? 0 : SM.a); b = SM.b == null ? f.last : SM.b;   // 시작 = 지금 프레임(범위 시작보다 앞이면 범위 시작), 끝 = 종료 프레임
+      if (b <= a) { flash('<b style="color:#f85149">지금 프레임이 종료 프레임 뒤입니다</b> <span style="color:var(--mut)">종료를 늘리거나 앞 프레임으로 가세요</span>', 3500); return; }
+    }
     else {
       if (SM.a == null) SM.a = 0; if (SM.b == null) SM.b = f.last;   // 시작/종료가 비어 있으면 클립 처음~끝(프레임바에 값이 남음)
       const ts = SM.seeds.map(q => q.t);
