@@ -802,9 +802,11 @@ function renderEditor(f) {
   let _activeJob = null, _cancelling = false;
   const hasProp = () => !!(SM.propFrames && SM.propFrames.length);
   const styleGo = () => {
-    const on = hasProp(), refine = on && SM.seeds.length > 0;
-    bGo.style.background = on && !refine ? "var(--blue)" : "var(--panel)"; bGo.style.color = on && !refine ? "#06090f" : "var(--blue)";
+    const on = hasProp(), refine = on && SM.seeds.length > 0, dis = !_activeJob && !SM.seeds.length;
+    bGo.style.background = on && !refine && !dis ? "var(--blue)" : "var(--panel)"; bGo.style.color = on && !refine && !dis ? "#06090f" : "var(--blue)";
     if (!_activeJob) { bGo.textContent = refine ? "이어서 전파" : "전파"; bGo.disabled = !SM.seeds.length; }
+    bGo.style.opacity = bGo.disabled ? "0.5" : "1"; bGo.style.cursor = bGo.disabled ? "not-allowed" : "pointer";
+    bGo.title = bGo.disabled ? "참조샷이 없습니다. 불을 탭하거나 박스를 그려 참조샷을 만든 뒤 전파하세요" : "참조샷으로 전파 → SAM 저장소 자동 저장. 결과가 있는 클립에서 참조샷을 더 찍으면 그 구간만 이어서";
     bClr.hidden = !on || !!_activeJob;
     const gt = GTMAP[f.clip] || {}, rv = on || shotSecs(f.stem).length > 0 || gtFramesOf(f.clip).length > 0 || Object.keys(gt.points || {}).length > 0;   // 검수 = 손라벨·SAM·정답 중 하나라도 있으면
     bRev.disabled = !rv; bRev.style.opacity = rv ? "1" : "0.4"; bRev.style.cursor = rv ? "pointer" : "default"; bRev.title = rv ? "학습 라벨(손·SAM)과 정답을 격자로 비교·검수" : "검수할 라벨이 없습니다";
@@ -840,7 +842,7 @@ function renderEditor(f) {
       pstat.innerHTML = seen.err === "cancelled" ? '<span style="color:var(--mut)">취소됨</span>' : seen.err ? `<b style="color:#f85149">실패</b> <span style="color:var(--mut)">${seen.err}</span>` : `<span style="color:var(--mut)">전파 ${seen.nframes || 0}프레임${why}</span>`;
       setTimeout(() => { if (mine()) pstat.innerHTML = ""; }, seen.err ? 4000 : 12000);
     }
-    if (!seen.err) { SM.seeds = []; SM.handRef = false; SM.objs = objsFor(); SM.cur = 1; if (mine()) { SP = []; SMASK = null; styleHand(); drawObjs(); } }   // 참조샷은 전파에 쓰였으니 정리(저장소 seeds 에 남는다)
+    if (!seen.err) { SM.handRef = false; if (mine()) { styleHand(); loadSam(); } }   // 참조샷은 그대로 둔다: 지우고 다시, 또는 이어서 전파할 수 있게. 참조 프레임은 손라벨이라 저장소에도 남는다
     await refreshSam();
   };
   const refineWindow = () => {                        // 이어서 전파할 구간: 새 참조샷마다 [같은 객체의 직전 저장소 참조샷, 직후 참조샷] 을 합친다

@@ -1018,7 +1018,7 @@ def sam2_store_clear(clip):
         return 0
     d = _sam2_load(clip)
     n = len(d["frames"])
-    d["frames"] = {}; d["polys"] = {}; d["seeds"] = []
+    d["frames"] = {}; d["polys"] = {}   # 결과만 비우고 참조샷(seeds)은 남긴다 → 지우고 다시 전파 가능. 완전 초기화는 clearlabels
     write_json(f, d)
     return n
 
