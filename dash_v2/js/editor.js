@@ -1211,7 +1211,9 @@ function buildFrameBar(f, status) {
 // 그 초의 박스를 서버에 쓴다. boxes 가 빈 배열이면 그 프레임은 '검토완료(빈 라벨)' 로 남는다. 서버가 같은 프레임의 SAM 결과를 뺀다.
 async function postLabel(clip, t, W, H, boxes, src, clear) {
   const kind = LB.img ? "image" : ((LB.mode === "person") ? "person" : "fire");
-  const evalCat = (typeof isScoringCat === "function") && isScoringCat((src || "").split("/")[2] || (LB.img || "").split("/")[2] || "");   // 채점 전용 카테고리 → eval 표시
+  const _rel = LB.img || src || "", _parts = _rel.split("/");
+  const _cat = _parts[0] === "data" ? (_parts[2] || "") : (_parts[0] || "");   // 이미지 rel = data/원본데이터/<카테고리>/… · 영상 src = <카테고리>/…/x.mp4
+  const evalCat = (typeof isScoringCat === "function") && isScoringCat(_cat);   // 채점 전용 카테고리 → eval 표시(학습셋 빌더가 뺀다)
   const res = await postJSON("/api/savelabel", { clip, t, src, file: LB.img || `${clip}_${String(t).padStart(4, "0")}.png`, W, H, boxes: boxes.map(b => b.slice(0, 6)), kind, clear: !!clear, eval: !!evalCat });   // 6번째 = 객체 번호(전파 박스를 손으로 고쳐도 객체 유지)
   if (!res.ok) throw new Error(res.err || "저장 실패");
   if (kind === "image") IMGLABELS = res.labels || IMGLABELS; else if (kind === "person") PLABELS = res.labels || PLABELS; else LABELS = res.labels || LABELS;

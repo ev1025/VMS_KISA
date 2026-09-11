@@ -4,6 +4,7 @@ defaults:
   base: aihub71751_48k          # 48k 평면풀(12프레임)
   oversample: { human_fire: 5 } # 손라벨 ×5 (목록 반복)
   val_small: 600
+  val_set: data/학습데이터/evalset_fire/val.txt   # 에폭 검증 = 채점 전용 영상 라벨(학습과 안 겹침). 없으면 val_small 로 자동 대체
   train: { epochs: 80, batch: 128, imgsz: 640, multi_scale: 0.5, cache: ram, workers: 16 }   # 워커 8개는 각 24%만 쓰고 놀았다(CPU 72코어 중 15코어만 사용, iowait 0) = 파일 열기 지연 대기. 워커를 늘려 대기를 겹친다
   vram_gate_mib: 100000
   min_free_gb: 300           # 가용 RAM 이 이보다 적으면 새 잡을 안 띄운다(컨테이너 한도는 안에서 못 읽는다)

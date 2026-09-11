@@ -118,7 +118,7 @@ async function buildResults() {
     const a = [t.epochs ? `${t.epochs}에폭` : "", t.batch ? `배치 ${t.batch}` : "", t.imgsz ? `${t.imgsz}px` : ""].filter(Boolean).join(" · ");
     return a + (m.n_train ? `<br>${Number(m.n_train).toLocaleString()}장` : "") + (m.status && m.status !== "ok" ? `<br><span style="color:${/fail|kill|error/i.test(m.status) ? "#f85149" : "var(--mut)"}">${m.status}</span>` : "");
   };
-  const HEAD = '<thead><tr style="color:var(--mut);text-align:left;font-size:11px"><th style="padding:8px 6px">실험</th><th>구성</th><th>학습</th><th>F1</th><th title="정검(정탐)·미검(놓침)·오검(오탐)">정·미·오</th><th>최적 규칙</th><th>시각</th><th></th></tr></thead>';
+  const HEAD = '<thead><tr style="color:var(--mut);text-align:left;font-size:11px"><th style="padding:8px 6px">실험</th><th>구성</th><th>학습</th><th>F1</th><th title="배포 검증영상에 친 라벨(학습 미포함)로 잰 mAP50 / mAP50-95">mAP(채점셋)</th><th title="정검(정탐)·미검(놓침)·오검(오탐)">정·미·오</th><th>최적 규칙</th><th>시각</th><th></th></tr></thead>';
   const VC = { "정검": "#3fb950", "미검": "#f85149", "오검": "#d29922", "무GT": "#484f58" };
 
   ITEMS.forEach(item => {
@@ -137,16 +137,18 @@ async function buildResults() {
         `<td style="padding:9px 6px;font-weight:${top ? 800 : 600};white-space:nowrap">${top ? "★ " : ""}${d.name}${(d._members || []).length > 1 ? ` <span style="color:var(--mut);font-weight:400">외 ${d._members.length - 1}건</span>` : ""}</td>` +
         `<td style="font-size:11px;line-height:1.5">${confOf(d)}</td><td style="color:var(--mut);font-size:11px;line-height:1.5;white-space:nowrap">${trainOf(d)}</td>` +
         `<td style="font-weight:800;font-size:14px;color:${col(d.score)};font-variant-numeric:tabular-nums">${d.score.toFixed(2)}</td>` +
+        `<td style="font-variant-numeric:tabular-nums;white-space:nowrap">${m.eval_map ? `<b>${m.eval_map.map50.toFixed(3)}</b> <span style="color:var(--mut)">/ ${m.eval_map.map5095.toFixed(3)}</span>` : '<span style="color:var(--mut)">–</span>'}</td>` +
         `<td style="font-variant-numeric:tabular-nums;white-space:nowrap"><span style="color:#3fb950">${d.tp}</span> <span style="color:var(--mut)">·</span> <span style="color:#d29922">${d.fn}</span> <span style="color:var(--mut)">·</span> <span style="color:#f85149">${d.fp}</span></td>` +
         `<td style="color:var(--mut);font-size:11px">${d.rule}</td><td style="color:var(--mut);font-variant-numeric:tabular-nums;white-space:nowrap">${fmtT(d.mtime)}</td>` +
         `<td style="color:var(--mut);user-select:none" title="구성 상세 · 규칙 스윕 전체">▸</td>`;
       tb.appendChild(tr);
       // 펼침: 구성 표(이름 → 뜻) + 규칙 스윕 표
-      const kv = [["구 규칙 최고 F1", d.score_old != null && d.score_old !== d.score ? d.score_old.toFixed(2) : null],
+      const kv = [["채점셋 mAP", m.eval_map ? `mAP50 ${m.eval_map.map50.toFixed(3)} · mAP50-95 ${m.eval_map.map5095.toFixed(3)} · P ${m.eval_map.P.toFixed(2)} · R ${m.eval_map.R.toFixed(2)} (${m.eval_map.n_frames}프레임 · ${m.eval_map.measured})` : null],
+        ["구 규칙 최고 F1", d.score_old != null && d.score_old !== d.score ? d.score_old.toFixed(2) : null],
         ["시작 → 끝 (KST)", m.started ? `${m.started} → ${m.ended || "진행 중"}` : null],
         ["동점·재기록", (d._members || []).length > 1 ? d._members.join(" · ") : null]].filter(([, v]) => v != null && v !== "");
       const sub = el("tr"); sub.hidden = true;
-      sub.innerHTML = `<td colspan="8" style="padding:6px 14px 12px;font-size:11px">` +
+      sub.innerHTML = `<td colspan="9" style="padding:6px 14px 12px;font-size:11px">` +
         (kv.length ? `<div style="display:grid;grid-template-columns:max-content 1fr;gap:3px 14px;max-width:820px;margin-bottom:6px">${kv.map(([k, v]) => `<span style="color:var(--mut)">${k}</span><span>${v}</span>`).join("")}</div>` : "") +
         ((d.rules || []).length > 1 ? `<table style="margin-top:10px;border-collapse:collapse"><thead><tr style="color:var(--mut)"><th style="text-align:left;padding:2px 8px">규칙</th><th style="padding:2px 8px">F1</th><th style="padding:2px 8px">정검</th><th style="padding:2px 8px">미검</th><th style="padding:2px 8px">오검</th></tr></thead><tbody>` +
           d.rules.map(r => `<tr><td style="padding:2px 8px">${r.rule}</td><td style="text-align:center;font-weight:700;color:${col(r.score)}">${r.score.toFixed(2)}</td><td style="text-align:center">${r.tp}</td><td style="text-align:center">${r.fn}</td><td style="text-align:center">${r.fp}</td></tr>`).join("") + `</tbody></table>` : "") + `</td>`;

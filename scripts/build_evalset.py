@@ -21,8 +21,11 @@ NAMES = ["fire", "smoke"] if a.mode == "fire" else ["person"]
 stats = collections.Counter()
 
 
-EVAL_CATS = sorted(c for c, cfg in D.all().items() if cfg.get("use") == "eval" and cfg.get("mode") == a.mode)
-EVAL_MP4 = {p.stem: p for c in EVAL_CATS for p in (RAW / c).rglob("*.mp4")}   # 채점 전용 카테고리 안만 한 번 훑는다(원본데이터 전체 rglob 은 COCO 12만 장 때문에 느리다)
+EVAL_CATS = sorted(c for c, cfg in D.all().items() if cfg.get("use") == "eval")
+def _clip_mode(p):                                  # 채점 카테고리는 항목별 하위 폴더(방화/침입/배회/쓰러짐)가 섞여 있다 → 폴더 이름으로 모드
+    s = str(p)
+    return "fire" if "방화" in s else ("person" if any(k in s for k in ("침입", "배회", "쓰러짐")) else D.get(p.relative_to(RAW).parts[0]).get("mode"))
+EVAL_MP4 = {p.stem: p for c in EVAL_CATS for p in (RAW / c).rglob("*.mp4") if _clip_mode(p) == a.mode}   # 채점 전용 카테고리 안만 한 번 훑는다
 
 
 def eval_clip(stem):
@@ -57,7 +60,7 @@ src = {}
 # 1) 손라벨 eval 행
 rows = json.load(io.open(V / f"data/학습데이터/손라벨/{a.mode}_labels.json", encoding="utf-8"))
 for r in rows:
-    if not r.get("eval"):
+    if r["clip"] not in EVAL_MP4:                    # 채점 클립인가로 판단(eval 표시는 보조. 표시가 빠진 행도 놓치지 않게)
         continue
     key = (r["clip"], round(float(r["t"]) * 2) / 2)
     frames.setdefault(key, []); src[key] = "hand"
@@ -112,6 +115,7 @@ for (stem, t), boxes in sorted(frames.items()):
 for c in caps.values():
     c.release()
 (OUT / "val.txt").write_text("\n".join(lst) + "\n")
+(OUT / "data.yaml").write_text(f"path: {OUT}\ntrain: {OUT}/val.txt\nval: {OUT}/val.txt\nnc: {len(NAMES)}\nnames: {NAMES}\n")   # 검증 전용. train 칸은 ultralytics 형식 때문에 채울 뿐 학습에 쓰지 않는다
 clips = sorted({s for s, _ in frames})
 meta = {"name": NAME, "mode": a.mode, "built": time.strftime("%F %T"), "frames": len(lst), "clips": clips,
         "boxes": sum(len(b) for b in frames.values()), "bg_per_clip": a.bg, "bg_margin_s": a.bg_margin,

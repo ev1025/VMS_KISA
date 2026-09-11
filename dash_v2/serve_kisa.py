@@ -1468,6 +1468,8 @@ class H(BaseHTTPRequestHandler):
                 if f.name == "score.txt":                       # 새 레이아웃: 실험명=폴더명, item 은 meta.json
                     try: _meta = json.loads((f.parent / "meta.json").read_text(encoding="utf-8"))
                     except Exception: _meta = {}
+                    try: _meta["eval_map"] = json.loads((f.parent / "eval_map.json").read_text(encoding="utf-8"))   # 채점 전용 검증셋 mAP
+                    except Exception: pass
                 rows = []
                 for m in pat.finditer(txt):
                     rows.append({"rule": m.group(1).strip(), "score": float(m.group(2)),
@@ -1492,7 +1494,7 @@ class H(BaseHTTPRequestHandler):
                     _item = "\ubc29\ud654"                       # 방화(기본)
                 out.append({"name": _stem, "score": best["score"], "rule": best["rule"],
                             "tp": best["tp"], "fn": best["fn"], "fp": best["fp"], "item": _item, "score_old": _score_old,
-                            "meta": {k: _meta.get(k) for k in ("model", "base", "extras", "extra", "status", "n_train", "train", "oversample", "started", "ended")}, "clips": _clips,
+                            "meta": {k: _meta.get(k) for k in ("model", "base", "extras", "extra", "status", "n_train", "train", "oversample", "started", "ended", "eval_map")}, "clips": _clips,
                             "n": len(rows), "mtime": int(f.stat().st_mtime), "rules": rows})
             # ---- 라이브 SA 생성기 채점 로그(logs/queue/val_*.log): 침입·배회·쓰러짐(·방화) 항목별 점수 + 클립별 판정 ----
             ITEM_OF = {"fire": "방화", "intrusion": "침입", "loitering": "배회", "loiter": "배회", "falldown": "쓰러짐", "fall": "쓰러짐"}

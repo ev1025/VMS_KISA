@@ -176,6 +176,10 @@ for cat, cfg in sorted(D.all().items()):
         items.append(("val" if is_val(rel) else "train", p, boxes, src_name))
         stats[f"이미지:{cat}:{src_name}"] += 1
 
+_EVAL_STEMS = {p.stem for c, cfg in D.all().items() if cfg.get("use") == "eval" for p in (RAW / c).rglob("*.mp4")}   # 채점 전용 클립: 학습·배경 어느 쪽으로도 절대 안 들어간다
+_leak = [src[0].stem for sp, src, bx, sn in items if isinstance(src, tuple) and src[0].stem in _EVAL_STEMS]
+assert not _leak, f"채점 전용 클립이 학습셋에 들어갔다: {sorted(set(_leak))[:5]}"
+stats["채점클립 검사"] = f"누수 0 (채점 클립 {len(_EVAL_STEMS)}편 제외 확인)"
 print(f"[{NAME}] 항목 {len(items):,}개"); [print(f"  {k}: {v}") for k, v in sorted(stats.items())]
 if a.dry:
     sys.exit(0)

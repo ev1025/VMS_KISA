@@ -190,6 +190,12 @@ def score(exp, pt):
            "--stride", "0.5", "--imgsz", "640", "--tiles", "--tag", exp["name"]]
     out = subprocess.run(cmd, capture_output=True, text=True, cwd=V).stdout
     (rdir / "score.txt").write_text(f"=== {exp['name']} 타일 ===\n" + out)
+    try:                                                    # 채점 전용 검증셋 mAP(학습에 안 들어간 배포 검증영상 라벨) → results/<exp>/eval_map.json
+        mode = "fire" if item == "방화" else "person"
+        if (V / "data/학습데이터" / f"evalset_{mode}" / "data.yaml").exists():
+            subprocess.run([str(PY), str(V / "scripts/eval_map.py"), mode, "--exp", exp["name"], "--pt", str(pt)], capture_output=True, text=True, cwd=V, timeout=1800)
+    except Exception as e:
+        log(f"{exp['name']} eval_map 실패: {e}")
     return out
 
 
