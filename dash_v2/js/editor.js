@@ -804,8 +804,9 @@ function renderEditor(f) {
   // ---------- SAM: 전파(서버 큐) → SAM 저장소 자동 저장. 결과가 있는 클립에서 참조샷을 더 찍으면 그 구간만 이어서 전파 ----------
   let _activeJob = null, _cancelling = false;
   const hasProp = () => !!(SM.propFrames && SM.propFrames.length);
+  const newSeeds = () => SM.seeds.filter(q => !(SAMSEEDS[f.clip] || []).some(sd => +sd.obj === q.obj && near(+sd.t, q.t)));   // 저장소에 아직 없는 참조샷 = 이번에 새로 찍은 것
   const styleGo = () => {
-    const on = hasProp(), refine = on && SM.seeds.length > 0, dis = !_activeJob && !SM.seeds.length;
+    const on = hasProp(), refine = on && newSeeds().length > 0, dis = !_activeJob && !SM.seeds.length;
     bGo.style.background = on && !refine && !dis ? "var(--blue)" : "var(--panel)"; bGo.style.color = on && !refine && !dis ? "#06090f" : "var(--blue)";
     if (!_activeJob) { bGo.textContent = refine ? "이어서 전파" : "전파"; bGo.disabled = !SM.seeds.length; }
     bGo.style.opacity = bGo.disabled ? "0.5" : "1"; bGo.style.cursor = bGo.disabled ? "not-allowed" : "pointer";
@@ -851,7 +852,7 @@ function renderEditor(f) {
   const refineWindow = () => {                        // 이어서 전파할 구간: 새 참조샷마다 [같은 객체의 직전 저장소 참조샷, 직후 참조샷] 을 합친다
     const stored = SAMSEEDS[f.clip] || [];
     let a = Infinity, b = -Infinity;
-    SM.seeds.forEach(q => {
+    newSeeds().forEach(q => {                        // 새 참조샷마다: 같은 객체의 직전 저장 참조샷 ~ 직후 저장 참조샷(없으면 시작/종료)
       const same = stored.filter(s => +s.obj === q.obj).map(s => +s.t);
       const prev = Math.max.apply(null, [SM.a == null ? 0 : SM.a, ...same.filter(t => t < q.t)]);
       const nxt = Math.min.apply(null, [SM.b == null ? f.last : SM.b, ...same.filter(t => t > q.t)]);
@@ -866,7 +867,7 @@ function renderEditor(f) {
       return;
     }
     if (!SM.seeds.length) return;
-    const refine = hasProp();
+    const refine = hasProp() && newSeeds().length > 0;   // 새 참조샷이 있을 때만 그 구간만 이어서. 없으면 전체 구간 다시
     let a, b;
     if (refine) [a, b] = refineWindow();
     else {
@@ -899,8 +900,21 @@ function renderEditor(f) {
     if ((ev.ctrlKey || ev.metaKey) && (ev.key === "z" || ev.key === "Z")) { ev.preventDefault(); ev.shiftKey ? restore(redo, hist) : restore(hist, redo); return; }   // Ctrl+Z 되돌리기 · Ctrl+Shift+Z 다시
     if ((ev.ctrlKey || ev.metaKey) && (ev.key === "y" || ev.key === "Y")) { ev.preventDefault(); restore(redo, hist); return; }
     if (ev.key === "c" || ev.key === "C") {                                              // C = 이전 프레임(저장된) 박스 복사. 불·쓰러진 사람은 제자리
-      const prev = existingBoxes(f.stem, f.t - _step());
-      if (prev && prev.length) { snap(); prev.forEach(b => LB.boxes.push(b.slice())); draw(); saveNow(); }
+      const pt = f.t - _step();
+      const prev = existingBoxes(f.stem, pt) || samBoxesAt(SAMMAP[f.clip] || {}, pt);   // 손라벨 없으면 전파 결과에서 복사
+      if (prev && prev.length) {
+        snap();
+        prev.forEach(b => {
+          const nb = b.slice(); if (nb[5] == null) { const o = isFire() ? objOfCls(nb[0]) : SM.cur; if (o != null) nb[5] = o; }
+          LB.boxes.push(nb); const i = LB.boxes.length - 1, o = nb[5];
+          if (o != null && PROP_OBJ(o)) {              // 복사한 박스 = 그 객체의 이 프레임 참조샷(연기는 참조샷 안 만듦)
+            SM.seeds = SM.seeds.filter(q => !(near(q.t, f.t) && q.obj === o));
+            SM.seeds.push({ t: f.t, obj: o, box: box4(nb), poly: [], pts: [], i });
+          }
+        });
+        SM.seeds.sort((a, b) => a.t - b.t || a.obj - b.obj);
+        loadSam(); draw(); saveNow();
+      }
       return;
     }
     if (ev.key === "?" || (ev.key === "/" && ev.shiftKey)) { toggleHelp(); return; }
