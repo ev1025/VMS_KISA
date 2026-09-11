@@ -52,8 +52,18 @@ async function buildResults() {
   const lastLog = (q.log || []).slice(-6).map(l => `<div style="color:var(--mut);font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap">${kst(l).replace(/</g, "&lt;")}</div>`).join("");
   qb.innerHTML = `<div style="font-weight:800">큐 <span style="color:${q.running.length ? "#3fb950" : "var(--mut)"}">${q.running.length ? "실행 중 " + q.running.length + "잡" : "대기/없음"}</span>` +
     (q.running.length ? ` <span style="color:var(--tx);font-weight:600">${q.running.join(" · ")}</span>` : "") + `</div>` +
+    ((q.jobs || []).length ? `<table style="border-collapse:collapse;margin:8px 0 4px;font-size:11px"><thead><tr style="color:var(--mut);text-align:left"><th style="padding:2px 10px 2px 0">실험</th><th style="padding:2px 10px">에폭</th><th style="padding:2px 10px">이 에폭</th><th style="padding:2px 10px">속도</th><th style="padding:2px 10px">에폭당</th><th style="padding:2px 10px">남음 → 예상 종료(KST)</th><th style="padding:2px 10px" title="직전 에폭 검증(학습 목록에서 뽑은 600장)">최근 mAP50 / 50-95</th><th style="padding:2px 10px">GPU</th></tr></thead><tbody>` +
+      q.jobs.map(j => j.epoch == null ? `<tr><td style="padding:3px 10px 3px 0;font-weight:700">${j.name}</td><td colspan="7" style="color:var(--mut)">${j.state || ""}</td></tr>` :
+        `<tr><td style="padding:3px 10px 3px 0;font-weight:700;white-space:nowrap">${j.name}</td>` +
+        `<td style="padding:3px 10px;font-variant-numeric:tabular-nums"><b>${j.epoch}</b>/${j.epochs} <span style="display:inline-block;width:70px;height:6px;background:var(--panel2);border-radius:3px;vertical-align:middle;margin-left:4px"><span style="display:block;width:${Math.round(j.epoch / j.epochs * 100)}%;height:100%;background:#3fb950;border-radius:3px"></span></span></td>` +
+        `<td style="padding:3px 10px;font-variant-numeric:tabular-nums">${j.pct}% <span style="color:var(--mut)">(${j.it}/${j.its} · ${j.elapsed} 경과 · ${j.eta} 남음)</span></td>` +
+        `<td style="padding:3px 10px;font-variant-numeric:tabular-nums">${j.it_s} it/s</td><td style="padding:3px 10px">${j.epoch_min != null ? j.epoch_min + "분" : "–"}</td>` +
+        `<td style="padding:3px 10px;font-variant-numeric:tabular-nums">${j.remain_h}시간 → <b>${j.finish_kst || "–"}</b></td>` +
+        `<td style="padding:3px 10px;font-variant-numeric:tabular-nums">${j.val ? `${j.val.map50.toFixed(3)} / ${j.val.map5095.toFixed(3)} <span style="color:var(--mut)">(P ${j.val.P.toFixed(2)} R ${j.val.R.toFixed(2)})</span>` : '<span style="color:var(--mut)">첫 검증 전</span>'}</td>` +
+        `<td style="padding:3px 10px">${j.mem}</td></tr>`).join("") + `</tbody></table>` : "") +
     `<details><summary style="cursor:pointer;color:var(--mut)">러너 로그</summary>${lastLog || '<div style="color:var(--mut)">로그 없음</div>'}</details>`;
   wrap.appendChild(qb);
+  if ((q.jobs || []).length && CUR.mode === "results") { clearTimeout(window._resT); window._resT = setTimeout(() => { if (CUR.mode === "results") buildResults(); }, 30000); }   // 학습 중이면 30초마다 갱신
 
   const col = s => s >= 90 ? "#3fb950" : s >= 70 ? "#d29922" : "#f85149";
   const fmtT = m => { const d = new Date(m * 1000); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };

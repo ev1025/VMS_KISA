@@ -1101,6 +1101,47 @@ sam2_store_drop_obj = _locked_store(sam2_store_drop_obj)
 sam2_store_clear = _locked_store(sam2_store_clear)
 
 
+def train_progress(name):
+    """logs/queue/<실험>.log 끝에서 ultralytics 진행줄과 마지막 검증줄을 읽는다.
+    진행줄: '  28/80  84.8G  1.132 0.926 1.191  325  640: 81% ━━ 1377/1681 1.9it/s 11:25<2:36'  (\r 로 갱신되는 한 줄)
+    검증줄: '  all  601  798  0.827  0.731  0.83  0.578'  (이미지 수, 박스 수, P, R, mAP50, mAP50-95)"""
+    f = G / "logs/queue" / f"{name}.log"
+    if not f.is_file():
+        return None
+    try:
+        with open(f, "rb") as fh:
+            fh.seek(max(0, f.stat().st_size - 200_000)); tail = fh.read().decode("utf-8", "ignore")
+    except Exception:
+        return None
+    tail = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", tail)                   # 색·커서 제어 제거
+    lines = [l for l in re.split(r"[\r\n]+", tail) if l.strip()]
+    prog = None
+    for l in reversed(lines):
+        m = re.search(r"^\s*(\d+)/(\d+)\s+([\d.]+G)\s+(?:[\d.]+\s+){3}\d+\s+\d+:\s*(\d+)%.*?(\d+)/(\d+)\s+([\d.]+)(it/s|s/it)\s+(\S+?)<(\S+)", l)
+        if m:
+            prog = m; break
+    if not prog:
+        return {"name": name, "state": "준비 중(라벨 스캔·캐시)"}
+    ep, eps, mem, pct, it, its, sp, unit, used, eta = prog.groups()
+    ep, eps, it, its, sp = int(ep), int(eps), int(it), int(its), float(sp)
+    it_s = sp if unit == "it/s" else (1.0 / sp if sp else 0)
+    val = None
+    for l in reversed(lines):
+        m = re.search(r"^\s*all\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)", l)
+        if m:
+            val = {"n": int(m.group(1)), "P": float(m.group(3)), "R": float(m.group(4)), "map50": float(m.group(5)), "map5095": float(m.group(6))}; break
+    ep_min = (its / it_s / 60.0) if it_s else None                        # 에폭당 분(지금 속도 기준)
+    def _s(t):                                                            # 'mm:ss' 또는 'h:mm:ss' → 초
+        try:
+            ps = [int(x) for x in t.split(":")]; return sum(v * 60 ** i for i, v in enumerate(reversed(ps)))
+        except Exception:
+            return 0
+    remain_s = _s(eta) + (eps - ep) * (ep_min or 0) * 60                  # 이 에폭 남은 것 + 남은 에폭(검증 시간은 안 넣어 조금 이르게 나온다)
+    finish = time.strftime("%m-%d %H:%M", time.gmtime(time.time() + 9 * 3600 + remain_s)) if ep_min else None
+    return {"name": name, "epoch": ep, "epochs": eps, "pct": int(pct), "it": it, "its": its, "it_s": round(it_s, 2), "elapsed": used, "eta": eta,
+            "mem": mem, "val": val, "epoch_min": round(ep_min, 1) if ep_min else None, "remain_h": round(remain_s / 3600, 1), "finish_kst": finish}
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -1405,6 +1446,7 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             q = {"running": sorted(set(running)), "log": []}
+            q["jobs"] = [j for j in (train_progress(n) for n in q["running"]) if j]   # 잡별 학습 진행(에폭·속도·mAP·예상 종료)
             try:
                 q["log"] = (G / "logs/queue/runner.log").read_text(encoding="utf-8", errors="ignore").splitlines()[-25:]
             except Exception:
