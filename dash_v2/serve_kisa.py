@@ -1448,8 +1448,42 @@ class H(BaseHTTPRequestHandler):
                     _item = "\ubc29\ud654"                       # 방화(기본)
                 out.append({"name": _stem, "score": best["score"], "rule": best["rule"],
                             "tp": best["tp"], "fn": best["fn"], "fp": best["fp"], "item": _item, "score_old": _score_old,
-                            "meta": {k: _meta.get(k) for k in ("model", "base", "extras", "extra", "status", "n_train")}, "clips": _clips,
+                            "meta": {k: _meta.get(k) for k in ("model", "base", "extras", "extra", "status", "n_train", "train", "oversample", "started", "ended")}, "clips": _clips,
                             "n": len(rows), "mtime": int(f.stat().st_mtime), "rules": rows})
+            # ---- 라이브 SA 생성기 채점 로그(logs/queue/val_*.log): 침입·배회·쓰러짐(·방화) 항목별 점수 + 클립별 판정 ----
+            ITEM_OF = {"fire": "방화", "intrusion": "침입", "loitering": "배회", "loiter": "배회", "falldown": "쓰러짐", "fall": "쓰러짐"}
+            for f in sorted((G / "logs/queue").glob("val_*.log")):
+                try:
+                    txt = f.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                last = None
+                for last in re.finditer(r"^\[(\w+)\] 정검 (\d+) 미검 (\d+) 오검 (\d+) → 점수 ([0-9.]+)(.*)$", txt, re.M):
+                    pass
+                if not last:
+                    continue
+                _clips = {c.group(1): c.group(2) for c in re.finditer(r"^\s*클립 (\S+): (\S+)", txt, re.M)}
+                st = "합격" if "합격" in last.group(6) else last.group(6).strip(" ()") or ""
+                row = {"rule": "라이브 SA 생성기(kisa_items)", "score": float(last.group(5)), "tp": int(last.group(2)), "fn": int(last.group(3)), "fp": int(last.group(4))}
+                out.append({"name": f.stem, "score": row["score"], "rule": row["rule"], "tp": row["tp"], "fn": row["fn"], "fp": row["fp"],
+                            "item": ITEM_OF.get(last.group(1), last.group(1)), "score_old": None,
+                            "meta": {"kind": "live_sa", "status": st, "note": f"logs/queue/{f.name}"}, "clips": _clips,
+                            "n": 1, "mtime": int(f.stat().st_mtime), "rules": [row]})
+            # ---- 보관 결과(results/ALL_RESULTS.json, 2026-09-07 정리본): 방화는 러너 결과가 따로 있어 사람 항목만 ----
+            try:
+                af = rdir / "ALL_RESULTS.json"
+                arc = json.loads(af.read_text(encoding="utf-8"))
+                for item, lst in (arc.get("항목") or {}).items():
+                    if item == "방화":
+                        continue
+                    for e in lst:
+                        row = {"rule": e.get("rule") or "", "score": float(e.get("f1", 0)), "tp": int(e.get("tp", 0)), "fn": int(e.get("fn", 0)), "fp": int(e.get("fp", 0))}
+                        out.append({"name": e.get("실험", ""), "score": row["score"], "rule": row["rule"], "tp": row["tp"], "fn": row["fn"], "fp": row["fp"],
+                                    "item": item, "score_old": None,
+                                    "meta": {"kind": "archive", "status": e.get("채점", ""), "note": f"results/ALL_RESULTS.json (정리 {arc.get('생성', '')})"},
+                                    "clips": {}, "n": 1, "mtime": int(af.stat().st_mtime), "rules": [row]})
+            except Exception:
+                pass
             out.sort(key=lambda r: -r["score"])
             self._bytes(json.dumps(out).encode("utf-8"), "application/json; charset=utf-8"); return
         if p == "/api/rawlabel":                 # 이미지 원본 정답 → 우리 클래스 규약의 YOLO 줄(datasets.yaml 의 gt·classes 로 변환)

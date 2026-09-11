@@ -25,8 +25,13 @@ SCORE_VIDEOS = {"방화": V / "data/원본데이터/kisa_배포_검증영상/dep
 IMG_EXT = (".jpg", ".jpeg", ".png")
 
 
+def _kst(fmt):
+    """서버 시계는 UTC. 사람이 읽는 시각은 전부 한국 시간(KST = UTC+9)으로 쓴다."""
+    return time.strftime(fmt, time.gmtime(time.time() + 9 * 3600))
+
+
 def log(msg):
-    line = f"[{time.strftime('%m-%d %H:%M')}] {msg}"
+    line = f"[{_kst('%m-%d %H:%M')} KST] {msg}"
     print(line, flush=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOG_DIR / "runner.log", "a", encoding="utf-8") as f:
@@ -196,13 +201,13 @@ def write_meta(exp, defaults, n_train, pt, started, status):
             "train": dict(defaults.get("train", {}), **exp.get("train", {})),
             "extra": dict(defaults.get("extra", {}), **exp.get("extra", {})),
             "n_train": n_train, "best_pt": str(pt) if pt else None,
-            "started": started, "ended": time.strftime("%Y-%m-%d %H:%M:%S"), "status": status}
+            "started": started, "ended": _kst("%Y-%m-%d %H:%M:%S"), "status": status}
     (rdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
 
 
 def run_one(exp, defaults):
     """한 실험 전체(목록→학습→채점→meta). 실패해도 예외를 밖으로 던지지 않는다."""
-    name = exp["name"]; started = time.strftime("%Y-%m-%d %H:%M:%S")
+    name = exp["name"]; started = _kst("%Y-%m-%d %H:%M:%S")
     try:
         pt = best_pt(exp)
         n_train = None
