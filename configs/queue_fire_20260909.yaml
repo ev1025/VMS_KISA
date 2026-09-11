@@ -24,19 +24,19 @@ experiments:
   - { name: fresh_48k_azimjaan_20260909, model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo] }
   # --- 24k vs 48k 데이터량 비교 (BASE 만 교체) ---
   - { name: fresh_24k_base_20260909,     model: yolo11s, base: aihub71751_24k, extras: [] }
-  - { name: fresh_24k_snowfull_20260909, model: yolo11s, base: aihub71751_24k, extras: [fasdd_snowfog, fasdd_yolo] }
+  # [2026-09-11 제외: 그리드와 중복] - { name: fresh_24k_snowfull_20260909, model: yolo11s, base: aihub71751_24k, extras: [fasdd_snowfog, fasdd_yolo] }
   # --- 모델 변형 (snowfull 레시피) ---
   - { name: fresh_snf_n_20260909,        model: yolo11n, extras: [fasdd_snowfog, fasdd_yolo] }
   - { name: fresh_snf_26n_20260909,      model: yolo26n, extras: [fasdd_snowfog, fasdd_yolo] }
   - { name: fresh_snf_l_20260909,        model: yolo11l, extras: [fasdd_snowfog, fasdd_yolo] }
   - { name: fresh_snf_x_20260909,        model: yolo11x, extras: [fasdd_snowfog, fasdd_yolo], train: { batch: 64 } }
   # --- 데이터 조합 ---
-  - { name: fresh_sink_20260909,         model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo, azimjaan_yolo, dfire_yolo] }
-  - { name: fresh_ext3_20260909,         model: yolo11s, extras: [fasdd_yolo, dfire_yolo] }
-  - { name: fresh_dfmix_20260909,        model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, dfire_yolo] }
+  # [2026-09-11 제외: 그리드와 중복] - { name: fresh_sink_20260909,         model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo, azimjaan_yolo, dfire_yolo] }
+  # [2026-09-11 제외: 그리드와 중복] - { name: fresh_ext3_20260909,         model: yolo11s, extras: [fasdd_yolo, dfire_yolo] }
+  # [2026-09-11 제외: 그리드와 중복] - { name: fresh_dfmix_20260909,        model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, dfire_yolo] }
   # --- 소형 불(원경) zoom-out 증강 scale 0.9 ---
-  - { name: fresh_zoom_snf_20260909,     model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo], extra: { scale: 0.9 } }
-  - { name: fresh_zoom_wild_20260909,    model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo], extra: { scale: 0.9 } }
+  # [2026-09-11 제외: 그리드와 중복] - { name: fresh_zoom_snf_20260909,     model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo], extra: { scale: 0.9 } }
+  # [2026-09-11 제외: 그리드와 중복] - { name: fresh_zoom_wild_20260909,    model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, wildfire_pos_yolo], extra: { scale: 0.9 } }
   # --- dfire (구 _exp_dfire.sh 대체) ---
-  - { name: dfire_48k_20260909,          model: yolo11s, extras: [dfire_yolo] }
-  - { name: dfire_48k_snowfull_20260909, model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, dfire_yolo] }
+  # [2026-09-11 제외: 그리드와 중복] - { name: dfire_48k_20260909,          model: yolo11s, extras: [dfire_yolo] }
+  # [2026-09-11 제외: 그리드와 중복] - { name: dfire_48k_snowfull_20260909, model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, dfire_yolo] }
