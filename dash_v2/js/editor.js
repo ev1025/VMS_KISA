@@ -370,7 +370,7 @@ function renderEditor(f) {
       if (obj && !q) { const bx = b[1] * f.W + 2, by = b[2] * f.H; s += `<text x="${bx}" y="${by >= 18 ? by - 4 : (b[2] + b[4]) * f.H + 16}" fill="${samCol(obj)}" font-size="16" font-weight="800">${obj}</text>`; }
     });
     const gt = GTMAP[f.clip];                         // 정답라벨(데이터셋 제공): 하늘색 점선 박스 + 마름모 점
-    if (gt && LB.src !== "gt") gtBoxesAt(gt, f.t).forEach(b => { s += rectSvg(b[1] * f.W, b[2] * f.H, b[3] * f.W, b[4] * f.H, SRC_COLOR.gt, true); });
+    if (gt && LB.src !== "gt" && !f.image) gtBoxesAt(gt, f.t).forEach(b => { s += rectSvg(b[1] * f.W, b[2] * f.H, b[3] * f.W, b[4] * f.H, SRC_COLOR.gt, true); });   // 이미지는 정답이 곧 편집 중인 박스라 겹그리지 않는다
     if (gt) gtPointsAt(gt, f.t).forEach(p => { const x = p.x * f.W, y = p.y * f.H; s += `<polygon points="${x},${y - 7} ${x + 7},${y} ${x},${y + 7} ${x - 7},${y}" fill="${SRC_COLOR.gt}" stroke="#0b0e13" stroke-width="1.5"/><text x="${x + 9}" y="${y - 6}" fill="${SRC_COLOR.gt}" font-size="13" font-weight="800">정답${p.obj}</text>`; });
     if (LB.src === "sam") samPolysAt(f.clip, f.t).forEach(p => { s += polySvg(p.poly, f.W, f.H, samCol(p.obj), MASK_FILL()); });   // 전파 결과 마스크: 객체별 독립 층
     const numAt = (box, cc, n) => { const bx = box[0] * f.W + 2, by = box[1] * f.H; return `<text x="${bx}" y="${by >= 18 ? by - 4 : (box[1] + box[3]) * f.H + 16}" fill="${cc}" font-size="16" font-weight="800">${n}</text>`; };
@@ -557,6 +557,11 @@ function renderEditor(f) {
     const pool = LB.boxes.map((b, i) => ({ b, i })).filter(o => !claimed.has(o.i));
     const hits = (label === 1 && !SP.length) ? pool.filter(o => x >= o.b[1] && x <= o.b[1] + o.b[3] && y >= o.b[2] && y <= o.b[2] + o.b[4]) : [];
     const hit = hits.sort((a, b) => a.b[3] * a.b[4] - b.b[3] * b.b[4])[0] || null;   // 겹치면 가장 작은 박스
+    if (hit && isFire()) {                             // 화재: 탭한 박스의 클래스가 곧 객체. 다른 객체 박스를 탭하면 그 객체로 바꿔 잡는다(연기 박스가 불로 바뀌지 않게)
+      const o = objOfCls(hit.b[0]);
+      if (o !== SM.cur) { SM.cur = o; SP = []; SMASK = null; drawObjs(); }
+      if (!PROP_OBJ(o)) { sel = hit.i; draw(); return; }   // 연기 박스 = 선택만(수동 편집). SAM 마스크로 바꾸지 않는다
+    }
     SP.push([+x.toFixed(5), +y.toFixed(5), label]); draw();                       // 탭 점은 항상 남긴다(박스 프롬프트여도 표시·참조샷에 기록)
     if (!hit && !SP.some(q => q[2] === 1)) return;                                  // 제외점만 있으면 마스크·박스를 만들지 않는다(포함점이나 박스가 있어야 대상이 정해진다)
     const body = hit ? { clip: f.clip, t, pts: [], box: box4(hit.b) } : { clip: f.clip, t, pts: SP };
@@ -592,12 +597,16 @@ function renderEditor(f) {
     persistSam(f.clip);
     rowObj.innerHTML = "";
     styleGo();
-    if (!SM.seeds.length && !shotSecs(f.stem).length && !samFramesOf(f.clip).length) return;   // 라벨(손·전파)도 참조샷도 없는 클립은 객체 줄을 비워 둔다(처음·전부 삭제 뒤). 객체 선택은 숫자키 1·2
+    if (!SM.seeds.length && !LB.boxes.length && !shotSecs(f.stem).length && !samFramesOf(f.clip).length) return;   // 화면 박스(정답 프리필 포함)·라벨(손·전파)·참조샷이 모두 없으면 객체 줄을 비워 둔다(처음·전부 삭제 뒤). 객체 선택은 숫자키 1·2
     SM.objs.forEach(o => {
       const row = el("div"); row.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap";
       const tag = el("button", null, samName(o)); tag.title = PROP_OBJ(o) ? "이 객체를 선택하고 탭·드래그" : "연기: 드래그로 직접 그린다. 전파하지 않는다(마스크가 연기 기둥을 못 따라감)"; tag.style.cssText = `width:auto;height:auto;padding:2px 9px;font-size:11px;border-radius:6px;border:2px solid ${samCol(o)};color:${o === SM.cur ? "#06090f" : samCol(o)};background:${o === SM.cur ? samCol(o) : "transparent"};cursor:pointer`;
       tag.onclick = () => { SM.cur = o; loadSam(); };
       row.appendChild(tag);
+      if (f.image) {                                 // 이미지: 이 객체의 박스 수(정답 프리필 포함). 없으면 비워 둔다
+        const n = LB.boxes.filter(b => (isFire() ? objOfCls(b[0]) : 1) === o).length;
+        if (n) { const c = el("span", null, `${n}박스`); c.style.cssText = "font-size:11px;color:var(--mut)"; row.appendChild(c); }
+      }
       if (!f.image) {                                // 이 객체의 라벨 프레임을 칩으로(손라벨·전파 구분 없음). 참조샷 칩만 초록 점 + ×(참조샷 취소). 이미지엔 프레임이 없다
         const S = _labelStore() || [];
         const hand = isFire() ? S.filter(r => r.clip === f.stem && r.cls === samCls(o)).map(r => quant(r.t)) : [];   // 사람 손라벨 박스엔 객체 번호가 없어 전파 결과·참조샷만
