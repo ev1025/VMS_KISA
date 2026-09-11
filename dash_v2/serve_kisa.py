@@ -4,10 +4,10 @@
 라벨 저장소 셋(표시·학습 우선순위 순):
   손라벨   data/학습데이터/손라벨/{person,fire}_labels.json   /api/savelabel · /api/labels · /api/clearlabels
   SAM 전파 data/학습데이터/자동라벨/sam2/<stem>.json         /api/sam2_propagate_start(큐) · sam2_jobs · sam2_cancel · sam2_label · sam2_drop · sam2_drop_obj · sam2_clear · sam2frames
-  DINO     data/학습데이터/자동라벨/dino/<stem>.json         /api/autolabel · autolabel_drop (배치 스크립트가 만든다. 첫 등장 프레임 찾기·초안용)
+  (DINO 자동라벨은 2026-09-11 걷어냈다. 의사라벨을 쓰지 않기로 했다.) 프레임 찾기·초안용)
   정답     data/학습데이터/정답라벨/<stem>.json               /api/gtlabel (읽기 전용)
 손라벨 박스가 있는 프레임은 SAM 저장소에서 빠진다(savelabel 이 빼고, 전파 저장이 건너뛴다).
-SAM: /api/sam2_mask(한 프레임 점·박스 → 마스크), /api/fuse_detect(Grounding DINO 박스 → SAM 마스크, 화재), 전파 방식 PROP_DEFAULT_MODE.
+SAM: /api/sam2_mask(한 프레임 점·박스 → 마스크), 전파 방식 PROP_DEFAULT_MODE(separate·joint)
 데이터 확인: /api/sources · raw · clips · clipconds · clipinfo · frameat · warmframes · dsimg · dslabel · rawlabel · vid
 결과: /api/meta · dataset · results · queue
 """
@@ -223,7 +223,7 @@ def _cache_write(key, obj):
 def clear_caches():
     """데이터 폴더를 옮기거나 이름을 바꾼 뒤 호출(대시보드 '캐시 새로고침' 버튼). 재시작 불필요."""
     global _SOURCES
-    _SOURCES = None; _RAW.clear(); _CLIPS.clear(); _CI.clear(); _CONDS.clear(); _AUTOL.clear()
+    _SOURCES = None; _RAW.clear(); _CLIPS.clear(); _CI.clear(); _CONDS.clear()
     for f in CACHE_DIR.glob("*.json"):                # 폴더 스캔 결과만. 뽑아 둔 프레임(frames/)은 그대로
         try: f.unlink()
         except Exception: pass
@@ -391,32 +391,11 @@ def read_frame(clip, sec, w=0):
     return data
 
 
-AUTOLABEL_DIR = G / "data/학습데이터/자동라벨/dino"
 _SAM2 = None
 SAM2_ID = "facebook/sam2.1-hiera-small"
 
 
-_AUTOL = {}
-
-
-def autolabel_of(clip):
-    """배치로 미리 떠 둔 DINO 자동라벨. {"frames": {"200.0": [[0,x,y,w,h,score], ...]}}"""
-    f = AUTOLABEL_DIR / (Path(clip).stem + ".json")
-    if not f.exists():
-        return None
-    k = str(f)
-    hit = _AUTOL.get(k)
-    if hit is not None and hit[0] == f.stat().st_mtime:
-        return hit[1]
-    try:
-        d = json.loads(f.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    _AUTOL[k] = (f.stat().st_mtime, d)
-    return d
-
-
-_CONDS = {}
+_CONDS = {}      # 카테고리별 조건(clip_conds) 캐시
 
 
 def clip_conds(cat):
@@ -666,7 +645,7 @@ def sam2_mask_pts(clip, sec, pts, box=None):
     return bx, poly, score
 
 
-PROP_DEFAULT_MODE = "separate"   # 전파 방식 기본값: separate(객체별 독립 세션) · joint(한 세션) · detect(프레임마다 DINO+SAM). eval_prop_modes.py 결과로 정한다
+PROP_DEFAULT_MODE = "separate"   # 전파 방식 기본값: separate(객체별 독립 세션) · joint(한 세션). eval_prop_modes.py 결과로 정한다
 PROP_THR = {1: 0.0, 2: 0.0}      # 객체별 마스크 로짓 임계(독립 적용). 연기(2)를 낮추면 흐린 연기를 더 담는다
 
 
@@ -697,7 +676,7 @@ def _seed_inputs(sd, W, H):
 def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None, a=None, b=None, mode=None, thr=None):
     """여러 객체 전파. seeds = [{"t": 초, "box": [x,y,w,h], "obj": 번호, "pts": [[x,y,label],...]}]
     구간: a·b(초)를 주면 그 구간만(교정 전파), 없으면 참조샷 앞뒤 back·fwd 초.
-    mode: separate(객체마다 독립 세션·독립 임계 → 서로 뭉개지지 않는다) · joint(한 세션에 전 객체) · detect(프레임마다 DINO 박스 → SAM 마스크)
+    mode: separate(객체마다 독립 세션·독립 임계 → 서로 뭉개지지 않는다) · joint(한 세션에 전 객체)
     반환 ({시각: {obj: [x,y,w,h]}}, {시각: {obj: 윤곽선}}, 걸린초, 오류)"""
     global _SAM2V
     import numpy as np, torch, time
@@ -711,8 +690,6 @@ def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None
     seeds = [sd for sd in seeds if t0 - 1e-6 <= float(sd["t"]) <= t1 + 1e-6]   # 구간 밖 참조는 이번 전파에 안 쓴다
     if not seeds:
         return {}, {}, 0, "구간 안 참조샷 없음"
-    if mode == "detect":
-        return propagate_detect(clip, seeds, t0, t1, float(step), progress)
     frames, times, W, H = _read_frames(clip, t0, t1, float(step))
     if not frames:
         return {}, {}, 0, "프레임 없음"
@@ -836,127 +813,6 @@ def sam2_propagate_objs(clip, seeds, back=5.0, fwd=10.0, step=0.5, progress=None
                     if k + 1 < len(sds) and idxs[k + 1] == i0:    # 같은 프레임에 참조가 둘이면 뒤 것만
                         continue
                     run_segment({oid: sd}, i0, max(i0, i1), i0, profs, False)
-    return out, polys, round(time.time() - tic, 1), None
-
-
-# ---------- Grounding DINO(zero-shot 박스) + SAM2(마스크) 융합: 형태가 모호한 연기용 ----------
-_GDINO = None
-GDINO_FIRE_PROMPT = "fire. flame."      # 연기는 뺐다: DINO 연기 박스가 손 박스와 IoU 0.08~0.29 로 안 맞는다(2026-09-11 5프레임 실측)
-GDINO_PERSON_PROMPT = "a person. a pedestrian. a human. a man walking. a person with an umbrella."
-
-
-def gdino_detect(fr_bgr, prompt, th=0.25):
-    """프레임(BGR) 한 장에서 프롬프트의 물체 박스. 반환 [(score, x1, y1, x2, y2, label)] 픽셀, 중복 제거."""
-    global _GDINO
-    import cv2, torch
-    h0, w0 = fr_bgr.shape[:2]
-    if _GDINO is None:                       # 첫 호출에만 로드(대시보드 기동을 무겁게 하지 않는다)
-        from transformers.models.grounding_dino.processing_grounding_dino import GroundingDinoProcessor      # transformers 5.x: Auto* 가 없다
-        from transformers.models.grounding_dino.modeling_grounding_dino import GroundingDinoForObjectDetection
-        mid = "IDEA-Research/grounding-dino-base"
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
-        _GDINO = (GroundingDinoProcessor.from_pretrained(mid), GroundingDinoForObjectDetection.from_pretrained(mid).to(dev).eval(), dev)
-    proc, model, dev = _GDINO
-    rgb = cv2.cvtColor(fr_bgr, cv2.COLOR_BGR2RGB)
-    with torch.no_grad():
-        inp = proc(images=rgb, text=prompt, return_tensors="pt").to(dev)
-        r = proc.post_process_grounded_object_detection(model(**inp), inp.input_ids, threshold=float(th), text_threshold=float(th), target_sizes=[(h0, w0)])[0]
-    labels = r.get("text_labels") or r.get("labels") or [""] * len(r["scores"])
-    dets = [(float(sc), *[float(v) for v in bx], str(lb)) for sc, bx, lb in zip(r["scores"], r["boxes"], labels)]
-    return nms_keep(dets)
-
-
-def _frame_bgr(clip, sec):
-    """프레임 한 장(BGR). 디스크 캐시 → 없으면 영상에서 뽑는다."""
-    import cv2, numpy as np
-    data = read_frame(clip, sec, 0)
-    if data is None:
-        return None
-    return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-
-
-def fuse_detect(clip, sec, th=0.25):
-    """화재 프레임: DINO 로 불 박스를 찾고 SAM2 로 마스크를 따서 객체 1(불) 하나를 돌려준다.
-    연기는 제외한다 — DINO 가 연기라고 준 박스가 사람이 그린 연기 박스와 거의 안 맞는다(IoU 0.08~0.29).
-    반환 {obj: {"box": [x,y,w,h], "poly": [...], "score": DINO 점수, "label": 텍스트}}"""
-    fr = _frame_bgr(clip, sec)
-    if fr is None:
-        return {}
-    h0, w0 = fr.shape[:2]
-    best = {}
-    for sc, x1, y1, x2, y2, lb in gdino_detect(fr, GDINO_FIRE_PROMPT, th):
-        if "smoke" in lb.lower():
-            continue
-        obj = 1
-        if obj in best and best[obj]["score"] >= sc:
-            continue
-        nb = [round(x1 / w0, 5), round(y1 / h0, 5), round((x2 - x1) / w0, 5), round((y2 - y1) / h0, 5)]
-        bx, poly, s2 = sam2_mask_pts(clip, sec, [], nb)
-        best[obj] = {"box": bx or nb, "poly": poly or [], "score": round(sc, 3), "sam": round(float(s2), 3), "label": lb}
-    return best
-
-
-def propagate_detect(clip, seeds, t0, t1, step, progress=None):
-    """전파 방식 detect: 프레임마다 DINO 박스 → 참조/직전 박스와 가장 가까운 것을 그 객체로 → SAM 마스크.
-    시간 기억이 없어 SAM2 전파보다 흔들리지만 연기처럼 형태가 바뀌는 대상에서 이탈이 없다. 비교 실험용."""
-    import time
-    tic = time.time()
-    by_obj = {}
-    for sd in seeds:
-        by_obj.setdefault(int(sd.get("obj", 1)), []).append(sd)
-    ts = []
-    t = t0
-    while t <= t1 + 1e-6:
-        ts.append(round(t, 2)); t = round(t + step, 3)
-    if progress is not None:
-        progress["total"] = len(ts); progress["done"] = 0
-    fr0 = _frame_bgr(clip, ts[0]) if ts else None
-    if fr0 is None:
-        return {}, {}, 0, "프레임 없음"
-    h0, w0 = fr0.shape[:2]
-    last = {oid: min(sds, key=lambda sd: abs(float(sd["t"]) - t0))["box"] for oid, sds in by_obj.items()}   # 객체별 직전 박스(정규화)
-    out, polys = {}, {}
-
-    def iou(a, b):
-        x1 = max(a[0], b[0]); y1 = max(a[1], b[1]); x2 = min(a[0] + a[2], b[0] + b[2]); y2 = min(a[1] + a[3], b[1] + b[3])
-        inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-        return inter / (a[2] * a[3] + b[2] * b[3] - inter or 1.0)
-
-    for t in ts:
-        if progress is not None:
-            if progress.get("cancel"):
-                raise RuntimeError("cancelled")
-            progress["done"] += 1
-        for oid, sds in by_obj.items():                 # 참조 프레임은 참조 박스를 그대로 쓴다
-            hit = next((sd for sd in sds if abs(float(sd["t"]) - t) < 1e-3), None)
-            if hit:
-                last[oid] = hit["box"]
-        fr = _frame_bgr(clip, t)
-        if fr is None:
-            continue
-        dets = gdino_detect(fr, GDINO_FIRE_PROMPT, 0.2)
-        for oid in by_obj:
-            want_smoke = (oid == 2)
-            cands = []
-            for sc, x1, y1, x2, y2, lb in dets:
-                if ("smoke" in lb.lower()) != want_smoke:
-                    continue
-                nb = [x1 / w0, y1 / h0, (x2 - x1) / w0, (y2 - y1) / h0]
-                ref = last.get(oid)
-                v = iou(nb, ref) if ref else 0.0
-                cx = nb[0] + nb[2] / 2 - (ref[0] + ref[2] / 2 if ref else 0.5); cy = nb[1] + nb[3] / 2 - (ref[1] + ref[3] / 2 if ref else 0.5)
-                cands.append((v, -(cx * cx + cy * cy), sc, nb))
-            cands = [c for c in cands if c[0] > 0.05 or -c[1] < 0.02]   # 직전 박스와 겹치거나 아주 가까운 것만
-            if not cands:
-                continue
-            _, _, sc, nb = max(cands)
-            bx, poly, _s = sam2_mask_pts(clip, t, [], nb)
-            if not bx:
-                continue
-            k = f"{t:.1f}"
-            out.setdefault(k, {})[str(oid)] = [round(v, 5) for v in bx]
-            polys.setdefault(k, {})[str(oid)] = poly or []
-            last[oid] = bx
     return out, polys, round(time.time() - tic, 1), None
 
 
@@ -1332,15 +1188,6 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)
             return
-        if p == "/api/fuse_detect":          # 화재 한 프레임: Grounding DINO 불·연기 박스 → SAM2 마스크
-            try:
-                n = int(self.headers.get("Content-Length", 0))
-                b = json.loads(self.rfile.read(n) or b"{}")
-                objs = fuse_detect(b["clip"], float(b["t"]), float(b.get("th", 0.25)))
-                self._bytes(json.dumps({"objs": objs}, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-            except Exception as e:
-                self._bytes(json.dumps({"objs": {}, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)
-            return
         if p == "/api/sam2_cancel":           # 이 클립의 대기·진행 중 전파 취소
             try:
                 n = int(self.headers.get("Content-Length", 0))
@@ -1380,41 +1227,6 @@ class H(BaseHTTPRequestHandler):
                 b = json.loads(self.rfile.read(n) or b"{}")
                 cnt = sam2_store_drop_obj(b["clip"], int(b["obj"]))
                 self._bytes(json.dumps({"ok": True, "dropped": cnt}).encode(), "application/json; charset=utf-8")
-            except Exception as e:
-                self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)
-            return
-        if p == "/api/autolabel_drop":       # DINO 자동라벨에서 그 프레임을 뺀다. 손라벨과 무관.
-            try:
-                n = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(n) or b"{}")
-                f = AUTOLABEL_DIR / (Path(body["clip"]).stem + ".json")
-                with _SAVE_LOCK:
-                    d = read_json(f, {"frames": {}})
-                    t = tkey(body["t"])
-                    if t in (d.get("frames") or {}):
-                        d["frames"][t] = []          # 지우지 않고 '검출 없음'으로 둔다(다시 프리필되지 않게)
-                        write_json(f, d); _AUTOL.pop(str(f), None)
-                self._bytes(json.dumps({"ok": True}).encode(), "application/json; charset=utf-8")
-            except Exception as e:
-                self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(),
-                            "application/json; charset=utf-8", 500)
-            return
-        if p == "/api/clearlabels":           # 학습 프레임 초기화: 클립의 손라벨 전부 삭제(백업) + SAM 저장소 비움
-            try:
-                n = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(n) or b"{}")
-                clip = Path(body["clip"]).stem
-                fl = label_file(body.get("kind"))
-                with _SAVE_LOCK:
-                    if fl.exists():                       # 초기화 직전 상태를 시각 붙여 따로 남긴다(복구용)
-                        bdir = fl.parent / "_backup"; bdir.mkdir(exist_ok=True)
-                        shutil.copyfile(fl, bdir / f"{fl.stem}.{time.strftime('%Y%m%d_%H%M%S')}.reset_{clip}.json")
-                    rows = read_json(fl, [])
-                    keep = [r for r in rows if r.get("clip") != clip]
-                    removed = len(rows) - len(keep)
-                    write_json(fl, keep)
-                sam_n = sam2_store_clear(body["clip"])
-                self._bytes(json.dumps({"ok": True, "hand_rows": removed, "sam_frames": sam_n}).encode(), "application/json; charset=utf-8")
             except Exception as e:
                 self._bytes(json.dumps({"ok": False, "err": str(e)}).encode(), "application/json; charset=utf-8", 500)
             return
@@ -1516,12 +1328,6 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/sam2label":            # SAM 전파 결과 저장소(클립 전체) {frames: {t: {obj: [x,y,w,h]}}, polys: {t: {obj: 윤곽선}}, seeds}
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             self._bytes(json.dumps(_sam2_load((q.get("clip") or [""])[0]), ensure_ascii=False).encode(), "application/json; charset=utf-8")
-            return
-        if p == "/api/autolabel":            # 미리 떠 둔 DINO 자동라벨(클립 전체)
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            d = autolabel_of((q.get("clip") or [""])[0])
-            self._bytes(json.dumps(d or {"frames": {}, "missing": True}, ensure_ascii=False).encode(),
-                        "application/json; charset=utf-8")
             return
         if p == "/api/sources":
             self._bytes(json.dumps(sources(), ensure_ascii=False).encode(),
