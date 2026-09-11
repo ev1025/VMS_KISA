@@ -93,8 +93,8 @@ def build_lists(exp, defaults):
     (d / "val_small.txt").write_text("\n".join([str(dummy)] + val) + "\n")
     val_path = d / "val_small.txt"                         # 기본: 학습 목록에서 뽑은 600장(학습과 겹친다 → 외운 정도만 보인다)
     vs = exp.get("val_set", defaults.get("val_set"))       # 권장: build_evalset.py 가 만든 검증 전용 val.txt(채점 전용 영상의 손라벨). 학습과 겹치지 않는다
-    if vs and Path(vs).is_file():
-        val_path = Path(vs)
+    if vs and (V / vs).is_file():
+        val_path = (V / vs).resolve()                      # 절대경로로: ultralytics 는 상대경로를 data.yaml 의 path 기준으로 푼다
     names = list(exp.get("names", defaults.get("names", ["fire", "smoke"])))   # 항목별 클래스(사람 큐 = ['person'])
     (d / "data.yaml").write_text(
         f"path: {d}\ntrain: {d/'train.txt'}\nval: {val_path}\nnc: {len(names)}\nnames: {names}\n")
