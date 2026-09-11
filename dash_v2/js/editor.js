@@ -799,7 +799,7 @@ function renderEditor(f) {
   };
 
   // ---------- SAM: 전파(서버 큐) → SAM 저장소 자동 저장. 결과가 있는 클립에서 참조샷을 더 찍으면 그 구간만 이어서 전파 ----------
-  let _activeJob = null;
+  let _activeJob = null, _cancelling = false;
   const hasProp = () => !!(SM.propFrames && SM.propFrames.length);
   const styleGo = () => {
     const on = hasProp(), refine = on && SM.seeds.length > 0;
@@ -828,11 +828,11 @@ function renderEditor(f) {
       const act = jobs.find(jb => jb.state === "running" || jb.state === "queued");
       if (!act) { _activeJob = null; if (seen) seen = jobs.find(jb => jb.id === seen.id) || seen; break; }
       seen = act; _activeJob = act;
-      if (mine()) { rowObj.style.pointerEvents = "none"; rowObj.style.opacity = "0.5"; bHand.disabled = true; bHand.style.opacity = "0.4"; bGo.disabled = false; bGo.textContent = "전파 취소"; bClr.hidden = true; pstat.innerHTML = act.state === "queued" ? `<span style="color:var(--mut)">대기 ${act.pos}</span>` : spin(act.total ? Math.min(99, Math.round(act.done / act.total * 100)) : 0); }
+      if (mine()) { rowObj.style.pointerEvents = "none"; rowObj.style.opacity = "0.5"; bHand.disabled = true; bHand.style.opacity = "0.4"; if (_cancelling) { bGo.disabled = true; bGo.textContent = "취소 중…"; } else { bGo.disabled = false; bGo.textContent = "전파 취소"; } bClr.hidden = true; pstat.innerHTML = act.state === "queued" ? `<span style="color:var(--mut)">대기 ${act.pos}</span>` : spin(act.total ? Math.min(99, Math.round(act.done / act.total * 100)) : 0); }
       await new Promise(r => setTimeout(r, 800));
     }
-    _watching = false;
-    if (!seen) { if (mine()) drawObjs(); return; }   // 작업이 없었다 → 버튼 상태만 원래대로
+    _watching = false; _cancelling = false;   // 취소든 완료든 끝났으니 잠금 해제(styleGo 가 '전파'/'이어서 전파'로 되돌린다)
+    if (!seen) { if (mine()) { styleGo(); drawObjs(); } return; }   // 작업이 없었다 → 버튼 상태만 원래대로
     if (mine()) {
       rowObj.style.pointerEvents = ""; rowObj.style.opacity = ""; bHand.disabled = false; bHand.style.opacity = ""; bGo.disabled = false;
       const dr = seen.drops || {}, skipped = (dr.lost || 0) + (dr.empty || 0) + (dr.size || 0);   // 프레임이 빠진 사유: 놓침(가림·이탈) · 크기 제한(참조 대비 3배/1/3 밖)
@@ -855,8 +855,8 @@ function renderEditor(f) {
     return [Math.max(0, a), Math.min(f.last, b)];
   };
   bGo.onclick = async () => {
-    if (_activeJob) {                                 // 진행·대기 중 → 취소(참조샷은 그대로 남아 다시 누르면 재전파)
-      bGo.disabled = true;
+    if (_activeJob) {                                 // 진행·대기 중 → 취소(참조샷은 그대로 남아 취소가 끝나면 다시 전파)
+      _cancelling = true; bGo.disabled = true; bGo.textContent = "취소 중…";
       await postJSON("/api/sam2_cancel", { clip: f.clip }).catch(() => {});
       return;
     }

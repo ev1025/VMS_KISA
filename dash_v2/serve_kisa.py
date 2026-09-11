@@ -1214,6 +1214,7 @@ class H(BaseHTTPRequestHandler):
                                      float(b.get("step", 0.5)), b.get("mode") or None)
                 if jid is None:
                     self._bytes(json.dumps({"err": "이 클립은 이미 전파 중입니다. 끝나면 다시 누르세요"}).encode(), "application/json; charset=utf-8"); return
+                    return                               # 응답 한 번만: return 없으면 {"id":null} 을 또 써서 연결이 깨지고 이후 요청 먹통
                 self._bytes(json.dumps({"id": jid}).encode(), "application/json; charset=utf-8")
             except Exception as e:
                 self._bytes(json.dumps({"err": str(e)}).encode(), "application/json; charset=utf-8", 500)
