@@ -592,7 +592,7 @@ function renderEditor(f) {
     persistSam(f.clip);
     rowObj.innerHTML = "";
     styleGo();
-    if (!SM.seeds.length && !isFire()) return;        // 사람: 탭하기 전엔 객체 줄을 비워 둔다(화재는 1 불 · 2 연기 를 항상 보여 고르게)
+    if (!SM.seeds.length && !shotSecs(f.stem).length && !samFramesOf(f.clip).length) return;   // 라벨(손·전파)도 참조샷도 없는 클립은 객체 줄을 비워 둔다(처음·전부 삭제 뒤). 객체 선택은 숫자키 1·2
     SM.objs.forEach(o => {
       const row = el("div"); row.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap";
       const tag = el("button", null, samName(o)); tag.title = PROP_OBJ(o) ? "이 객체를 선택하고 탭·드래그" : "연기: 드래그로 직접 그린다. 전파하지 않는다(마스크가 연기 기둥을 못 따라감)"; tag.style.cssText = `width:auto;height:auto;padding:2px 9px;font-size:11px;border-radius:6px;border:2px solid ${samCol(o)};color:${o === SM.cur ? "#06090f" : samCol(o)};background:${o === SM.cur ? samCol(o) : "transparent"};cursor:pointer`;

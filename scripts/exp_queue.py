@@ -86,8 +86,12 @@ def build_lists(exp, defaults):
     rnd = random.Random(0)
     val = rnd.sample(lines[1:], min(int(defaults.get("val_small", 600)), len(lines) - 1))
     (d / "val_small.txt").write_text("\n".join([str(dummy)] + val) + "\n")
+    val_path = d / "val_small.txt"                         # 기본: 학습 목록에서 뽑은 600장(학습과 겹친다 → 외운 정도만 보인다)
+    vs = exp.get("val_set", defaults.get("val_set"))       # 권장: build_evalset.py 가 만든 검증 전용 val.txt(채점 전용 영상의 손라벨). 학습과 겹치지 않는다
+    if vs and Path(vs).is_file():
+        val_path = Path(vs)
     (d / "data.yaml").write_text(
-        f"path: {d}\ntrain: {d/'train.txt'}\nval: {d/'val_small.txt'}\nnc: 2\nnames: ['fire','smoke']\n")
+        f"path: {d}\ntrain: {d/'train.txt'}\nval: {val_path}\nnc: 2\nnames: ['fire','smoke']\n")
     return d, len(lines) - 1
 
 
