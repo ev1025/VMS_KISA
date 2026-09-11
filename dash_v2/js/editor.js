@@ -521,12 +521,16 @@ function renderEditor(f) {
     SM.seeds.push({ t: f.t, obj: SM.cur, box, poly: poly || [], pts: (pts || []).slice(), i: idx }); SM.seeds.sort((a, b) => a.t - b.t || a.obj - b.obj);
     drawObjs();
   };
-  const seedForBox = i => {                          // 이 프레임에서 LB.boxes[i] 를 잡고 있는 참조샷: 위치(IoU) 우선, 없으면 인덱스
+  const seedForBox = i => {                          // 이 프레임에서 LB.boxes[i] 의 참조샷. 박스의 객체 번호(6번째)가 곧 정체성 → 그 번호의 참조샷(거리 안 본다)
     const b = LB.boxes[i]; if (!b) return null;
     const here = SM.seeds.filter(q => near(q.t, f.t));
-    let best = null, bi = 0.3;
+    if (b[5] != null) return here.find(q => q.obj === +b[5]) || null;
+    let best = null, bi = 0.3;                         // 번호 없는 옛 박스만: 위치(IoU) → 인덱스. pinObjs 가 곧 번호를 박아 다음부턴 이 길로 안 온다
     here.forEach(q => { const v = iou4(q.box, box4(b)); if (v > bi) { bi = v; best = q; } });
     return best || here.find(q => q.i === i) || null;
+  };
+  const pinObjs = () => {                            // 번호 없는 박스에 객체 번호를 한 번 박는다(참조샷 → 화재는 클래스). 이후 편집은 번호만 따른다
+    LB.boxes.forEach((b, i) => { if (b[5] == null) { const q = seedForBox(i); const o = q ? q.obj : (isFire() ? objOfCls(b[0]) : null); if (o != null) b[5] = o; } });
   };
   const clipPoly = (poly, box) => (poly || []).map(p => [Math.min(Math.max(p[0], box[0]), box[0] + box[2]), Math.min(Math.max(p[1], box[1]), box[1] + box[3])]);   // 마스크 윤곽선을 박스 안으로 자른다(박스를 줄이면 마스크도 그만큼 줄어 보인다)
   const seedFromBox = (i, create, ownerIn) => {   // ownerIn: 움직이기 전에 잡아둔 소유 참조샷(있으면 IoU 재탐색 대신 그걸 쓴다)               // 박스의 참조샷 동기화. create=true(새 박스 드래그)면 참조샷이 없을 때 현재 객체 것으로 만든다.
@@ -781,7 +785,7 @@ function renderEditor(f) {
     loadSam(); fillShots(); draw();
   };
   const loadSam = () => {
-    pruneSeeds(); const sd = SM.seeds.find(q => near(q.t, f.t) && q.obj === SM.cur); SP = sd && sd.pts ? sd.pts.slice() : []; SMASK = sd ? { box: sd.box, poly: sd.poly } : null; drawObjs(); draw(); };
+    pinObjs(); pruneSeeds(); const sd = SM.seeds.find(q => near(q.t, f.t) && q.obj === SM.cur); SP = sd && sd.pts ? sd.pts.slice() : []; SMASK = sd ? { box: sd.box, poly: sd.poly } : null; drawObjs(); draw(); };
   const deleteObjAt = async (o, t) => {              // 객체 o 를 프레임 t 에서 삭제(규칙 2·3). 참조샷·손라벨·전파 박스 모두
     const isCur = near(f.t, t);
     const objOf = b => (b[5] != null ? b[5] : (isFire() ? objOfCls(b[0]) : null));   // 박스의 객체: 전파 박스는 6번째, 화재 손라벨은 클래스로
