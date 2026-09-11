@@ -1,0 +1,42 @@
+# 방화 그리드 서치 1단계(스크리닝) — 2026-09-12 계획. 아직 시작 안 함(방화 큐·혼합 큐 뒤).
+# 목적: 하드네거티브 / 손라벨 오버샘플 / 라벨 있는 원천셋 / 베이스 비율 중 무엇이 채점셋 mAP 를 움직이는지 한 요인씩 확인.
+# 기준(B) = 지금 채점셋 mAP 최고 조합: 48k + fasdd_snowfog + fasdd + azimjaan (mAP50 0.309). 손라벨은 handset_fire_hn(손·전파·하드네거 703장).
+# 스크리닝은 40에폭·yolo11s·640 으로 짧게(잡당 ≈4~5시간). 상위 2조합만 2단계(80에폭, 11s/11m, 640/960)로 올린다.
+# 지표: 1차 = 채점셋 mAP50(불·연기 각각) · 2차 = 채점 F1. 같은 요인 안에서 mAP50 차이 0.02 미만은 동률로 본다(771프레임 잡음 수준).
+# 실행: 방화 큐가 끝난 뒤 → nohup .venv/bin/python scripts/exp_queue.py run configs/queue_grid_fire_20260912.yaml --jobs 2
+defaults:
+  base: aihub71751_48k
+  oversample: { }
+  val_small: 600
+  val_set: data/학습데이터/evalset_fire/val.txt
+  train: { epochs: 40, batch: 96, imgsz: 640, multi_scale: 0.5, cache: ram, workers: 16 }
+  vram_gate_mib: 100000
+  min_free_gb: 300
+  ram_cache_max: 60000
+  stagger_sec: 600
+
+experiments:
+  # ---- G0 기준선 (40에폭 재측정, 다른 그리드의 비교 기준) ----
+  - { name: g_B_20260912,            model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo] }
+
+  # ---- G1 하드 네거티브: 없음 / 우리 3 / 우리 5 / 우리 8 / 우리 5 + 범용 안개 배경 ----
+  # handset_fire_hn3/5/8 = build_trainset fire --no-gt --neg N (손·전파 + 앞뒤 배경 N장씩)
+  - { name: g_hn0_20260912,          model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo], oversample: { handset_fire_hn0: 4 } }
+  - { name: g_hn3_20260912,          model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo], oversample: { handset_fire_hn3: 4 } }
+  - { name: g_hn5_20260912,          model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo], oversample: { handset_fire_hn: 4 } }
+  - { name: g_hn8_20260912,          model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo], oversample: { handset_fire_hn8: 4 } }
+  - { name: g_hn5_fog_20260912,      model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo, wildfire_fog_neg], oversample: { handset_fire_hn: 4 } }
+
+  # ---- G2 손라벨 오버샘플 배수: ×0(위 g_B) / ×2 / ×4(위 g_hn5) / ×8 ----
+  - { name: g_ov2_20260912,          model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo], oversample: { handset_fire_hn: 2 } }
+  - { name: g_ov8_20260912,          model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo], oversample: { handset_fire_hn: 8 } }
+
+  # ---- G3 라벨 있는 원천셋 절제/추가 (hn5·×4 고정) ----
+  - { name: g_noazim_20260912,       model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo],                              oversample: { handset_fire_hn: 4 } }
+  - { name: g_nofasdd_20260912,      model: yolo11s, extras: [fasdd_snowfog, azimjaan_yolo],                           oversample: { handset_fire_hn: 4 } }
+  - { name: g_dfire_20260912,        model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo, dfire_yolo],   oversample: { handset_fire_hn: 4 } }
+  - { name: g_wildpos_20260912,      model: yolo11s, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo, wildfire_pos_yolo], oversample: { handset_fire_hn: 4 } }
+
+  # ---- G4 베이스(48k) 비율: 25% / 50% (100% = g_hn5). 외부 대규모 데이터가 얼마나 필요한가 ----
+  - { name: g_base25_20260912,       model: yolo11s, base_frac: 0.25, extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo], oversample: { handset_fire_hn: 4 } }
+  - { name: g_base50_20260912,       model: yolo11s, base_frac: 0.5,  extras: [fasdd_snowfog, fasdd_yolo, azimjaan_yolo], oversample: { handset_fire_hn: 4 } }

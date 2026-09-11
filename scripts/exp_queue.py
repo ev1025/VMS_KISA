@@ -75,6 +75,9 @@ def build_lists(exp, defaults):
     d.mkdir(parents=True, exist_ok=True)
     base = find_dataset(exp.get("base", defaults.get("base", "aihub71751_48k")))
     lines = list_images(base)
+    frac = float(exp.get("base_frac", defaults.get("base_frac", 1.0)))
+    if 0 < frac < 1:                                        # 베이스 비율 실험(G4): 고정 시드로 일부만
+        lines = random.Random(1).sample(lines, int(len(lines) * frac))
     oversample = dict(defaults.get("oversample", {}), **exp.get("oversample", {}))
     for ds, k in oversample.items():                       # 예: human_fire: 5 → 같은 경로 5번
         imgs = list_images(find_dataset(ds))
